@@ -322,8 +322,7 @@ pub fn parse_fields<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Fields<'a>> {
     })
 }
 
-pub fn parse_struct<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Struct<'a>> {
-    let visibility = parse_visibility(tokens);
+fn parse_struct_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility) -> Result<Struct<'a>> {
     eat_token(tokens, Symbol("struct")).unwrap_or_expected_at(tokens, "expected the struct keyword")?;
     let name = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected a struct name")?;
     let body = parse_fields(tokens)?;
@@ -333,6 +332,12 @@ pub fn parse_struct<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Struct<'a>> {
         name,
         body,
     })
+}
+
+pub fn parse_struct<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Struct<'a>> {
+    let visibility = parse_visibility(tokens);
+
+    parse_struct_inner(tokens, visibility)
 }
 
 pub fn parse_enum_variant<'a>(tokens: &mut Vec<Token<'a>>) -> Result<EnumVariant<'a>> {
@@ -347,8 +352,7 @@ pub fn parse_enum_variant<'a>(tokens: &mut Vec<Token<'a>>) -> Result<EnumVariant
     })
 }
 
-pub fn parse_enum<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Enum<'a>> {
-    let visibility = parse_visibility(tokens);
+fn parse_enum_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility) -> Result<Enum<'a>> {
     eat_token(tokens, Symbol("enum")).unwrap_or_expected_at(tokens, "expected the enum keyword")?;
     let name = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected a enum name")?;
     let body = parse_group(tokens, parse_enum_variant, BraceOpen, BraceClose)
@@ -359,6 +363,12 @@ pub fn parse_enum<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Enum<'a>> {
         name,
         body,
     })
+}
+
+pub fn parse_enum<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Enum<'a>> {
+    let visibility = parse_visibility(tokens);
+
+    parse_enum_inner(tokens, visibility)
 }
 
 pub fn parse_field_init<'a>(tokens: &mut Vec<Token<'a>>) -> Result<(Identifier<'a>, Expression<'a>)> {
@@ -513,8 +523,7 @@ fn parse_return_type<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Option<Type<'a>>
     })
 }
 
-pub fn parse_function_declaration<'a>(tokens: &mut Vec<Token<'a>>) -> Result<FunctionDeclaration<'a>> {
-    let visibility = parse_visibility(tokens);
+fn parse_function_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility) -> Result<FunctionDeclaration<'a>> {
     eat_token(tokens, Symbol("fn")).unwrap_or_expected_at(tokens, "expected the `fn` keyword")?;
     let name = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected a function name")?;
     let parameters = parse_group(tokens, parse_parameter, ParenthesisOpen, ParenthesisClose)
@@ -528,6 +537,29 @@ pub fn parse_function_declaration<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Fun
         parameters,
         ret_type,
         body,
+    })
+}
+
+pub fn parse_function_declaration<'a>(tokens: &mut Vec<Token<'a>>) -> Result<FunctionDeclaration<'a>> {
+    let visibility = parse_visibility(tokens);
+
+    parse_function_inner(tokens, visibility)
+}
+
+pub enum Declaration<'a> {
+    Enum(Enum<'a>),
+    Function(FunctionDeclaration<'a>),
+    Struct(Struct<'a>),
+}
+
+pub fn parse_declaration<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Declaration<'a>> {
+    let visibility = parse_visibility(tokens);
+
+    Ok(match peek_token(tokens) {
+        Some(Symbol("enum")) => Declaration::Enum(parse_enum_inner(tokens, visibility)?),
+        Some(Symbol("fn")) => Declaration::Function(parse_function_inner(tokens, visibility)?),
+        Some(Symbol("struct")) => Declaration::Struct(parse_struct_inner(tokens, visibility)?),
+        kind => Err(format!("expected a struct, enum or function declaration, got {kind:?}"))?
     })
 }
 

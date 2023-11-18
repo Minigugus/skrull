@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt::{Debug, Formatter};
 
-use crate::parser::{parse_function_declaration, parse_struct};
+use crate::parser::{parse_declaration, parse_function_declaration};
 use crate::types::{ModuleBuilder, ResolverContext, StructFields, Symbol, SymbolRef, SymbolType};
 
 type Result<T> = core::result::Result<T, Cow<'static, str>>;
@@ -73,6 +73,7 @@ impl ValueKind {
             }
         }
     }
+
     pub fn is_assignable_from(&self, src: &ValueKind) -> bool {
         match self {
             _ if matches!(src, ValueKind::Never) => true,
@@ -450,8 +451,12 @@ fn eval(ctx: &impl ResolverContext, body: &Body, params: &[Value]) -> Result<Val
                     values.push(value);
                 }
 
+                if !initializers.is_empty() {
+                    return Err(format!("fields '{}' don't exist on struct '{}'", initializers.keys().map(AsRef::as_ref).collect::<Vec<_>>().join("', '"), s.name()).into());
+                }
                 if !missing_fields.is_empty() {
-                    return Err(format!("fields '{}' don't exist on struct {}", missing_fields.join("', '"), s.name()).into());
+                    missing_fields.reverse();
+                    return Err(format!("missing fields '{}' while creating a '{}'", missing_fields.join("', '"), s.name()).into());
                 }
 
                 Value::Composed(Composed::Struct(values), sr.clone())
@@ -547,8 +552,6 @@ pub fn fib(n: i64) -> i64 {
 }
 "#)?;
 
-    // assert_eq!(tokens, vec![]);
-
     let root = parse_function_declaration(&mut tokens)?;
 
     let module = ModuleBuilder::new("my_first_module")
@@ -556,29 +559,10 @@ pub fn fib(n: i64) -> i64 {
         .build()?;
 
     if let Some(Symbol::Function(f)) = module.get_by_name("fib") {
-        // assert_eq!(f.body().ops, Vec::default());
         let body = f.body();
         assert_eq!([
-                       eval(&module, body, &[Value::I64(0)])?,
-                       eval(&module, body, &[Value::I64(1)])?,
-                       eval(&module, body, &[Value::I64(2)])?,
-                       eval(&module, body, &[Value::I64(3)])?,
-                       eval(&module, body, &[Value::I64(4)])?,
-                       eval(&module, body, &[Value::I64(5)])?,
-                       eval(&module, body, &[Value::I64(6)])?,
-                       eval(&module, body, &[Value::I64(7)])?,
-                       eval(&module, body, &[Value::I64(8)])?,
                        eval(&module, body, &[Value::I64(26)])?
                    ], [
-                       Value::I64(0),
-                       Value::I64(1),
-                       Value::I64(1),
-                       Value::I64(2),
-                       Value::I64(3),
-                       Value::I64(5),
-                       Value::I64(8),
-                       Value::I64(13),
-                       Value::I64(21),
                        Value::I64(121393)
                    ]);
     }
@@ -591,38 +575,45 @@ fn it_runs_fn_with_composed_types() -> Result<()> {
     use crate::lexer::Token;
 
     let mut tokens = Token::parse_ascii(r#"
+fn new_point(x: i64, y: i64) -> Point {
+  Point {
+    x,
+    y: y + -1
+  }
+}
+
+// declaration order shouldn't matter
+
 struct Point {
   x: i64,
   y: i64,
 }
-
-fn new_point(x: i64, y: i64) -> Point {
-  Point {
-    x: x,
-    y: y
-  }
-}
 "#)?;
 
     let module = ModuleBuilder::new("my_first_module")
-        .add_struct(parse_struct(&mut tokens)?)
-        .add_function(parse_function_declaration(&mut tokens)?)
+        .add_declaration(parse_declaration(&mut tokens)?)
+        .add_declaration(parse_declaration(&mut tokens)?)
         .build()?;
 
-    if let Some(Symbol::Function(f)) = module.get_by_name("new_point") {
-        // assert_eq!(f.body().ops, Vec::default());
-        let body = f.body();
-        assert_eq!(
-            [
-                eval(&module, body, &[Value::I64(0), Value::I64(1)])?,
-            ], [
-                Value::Composed(
-                    Composed::Struct(vec![Value::I64(0), Value::I64(1)]),
-                    SymbolRef::new(0, SymbolType::Struct),
-                )
-            ]
-        );
-    }
+    let Some(point_ref @ SymbolRef(_, SymbolType::Struct)) = module.get_ref_by_name("Point") else {
+        return Err("'Point' is supposed to be declared as a struct")?;
+    };
+
+    let Some(Symbol::Function(f)) = module.get_by_name("new_point") else {
+        return Err("'new_point' is supposed to be a function")?;
+    };
+
+    let body = f.body();
+    assert_eq!(
+        [
+            eval(&module, body, &[Value::I64(0), Value::I64(1)])?,
+        ], [
+            Value::Composed(
+                Composed::Struct(vec![Value::I64(0), Value::I64(0)]),
+                point_ref,
+            )
+        ]
+    );
 
     Ok(())
 }

@@ -1,7 +1,7 @@
-use alloc::borrow::Cow;
+use alloc::borrow::{Cow, ToOwned};
 use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::collections::btree_map::Values;
-use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
@@ -10,7 +10,7 @@ use core::cell::RefCell;
 use core::fmt::{Debug, Display, Formatter};
 
 use crate::bytecode::{Body, ValueKind, ValueRef};
-use crate::parser::{BlockExpression, Enum, Expression, Fields, FunctionDeclaration, Identifier, Struct, Type, Visibility};
+use crate::parser::{BlockExpression, Declaration, Enum, Expression, Fields, FunctionDeclaration, Identifier, Struct, Type, Visibility};
 
 type Result<T> = core::result::Result<T, Cow<'static, str>>;
 
@@ -22,9 +22,9 @@ trait SymbolLoader {
 
 trait LoaderContext {
     fn get_symbol_from_ref(&self, r: &SymbolRef) -> Result<&Symbol>;
-    fn get_symbol_ref_from_name(&self, name: &str) -> Result<SymbolRef>;
+    fn get_symbol_ref_from_name(&self, name: &(impl AsRef<str> + ?Sized)) -> Result<SymbolRef>;
 
-    fn get_symbol_from_name(&self, name: &str) -> Result<&Symbol> {
+    fn get_symbol_from_name(&self, name: &(impl AsRef<str> + ?Sized)) -> Result<&Symbol> {
         self.get_symbol_from_ref(&self.get_symbol_ref_from_name(name)?)
     }
 }
@@ -36,6 +36,23 @@ pub trait ResolverContext {
 impl ResolverContext for () {
     fn get_symbol(&self, _: &SymbolRef) -> Result<&Symbol> {
         Err("symbols not supported by this resolver".into())
+    }
+}
+
+impl ValueKind {
+    fn to_string(&self, ctx: &impl LoaderContext) -> String {
+        match self {
+            ValueKind::Never => "!".into(),
+            ValueKind::Unit => "()".into(),
+            ValueKind::Bool => "bool".into(),
+            ValueKind::I64 => "i64".into(),
+            ValueKind::Type(sr) => {
+                match ctx.get_symbol_from_ref(sr) {
+                    Ok(found) => found.name().unwrap_or("<unnamed type>").into(),
+                    Err(e) => format!("<unresolved: {e}>")
+                }
+            }
+        }
     }
 }
 
@@ -55,14 +72,12 @@ impl From<Visibility> for Scope {
 }
 
 #[derive(Debug, Clone)]
+#[cfg(not(test))]
 pub struct SymbolRef(u32, SymbolType);
 
+#[derive(Debug, Clone)]
 #[cfg(test)]
-impl SymbolRef {
-    pub fn new(id: u32, typ: SymbolType) -> SymbolRef {
-        Self(id, typ)
-    }
-}
+pub struct SymbolRef(pub u32, pub SymbolType);
 
 impl Eq for SymbolRef {}
 
@@ -120,6 +135,34 @@ impl<'a> PendingProcessing<'a> {
             PendingProcessing::Enum(sym) => (sym.name.as_ref().to_string(), SymbolType::Enum),
             PendingProcessing::Function(sym) => (sym.name.as_ref().to_string(), SymbolType::Function(Rc::new(type_to_value_kind(sym.ret_type.unwrap_or(Type::Unit))))),
         })
+    }
+}
+
+impl<'a> From<Struct<'a>> for PendingProcessing<'a> {
+    fn from(value: Struct<'a>) -> Self {
+        Self::Struct(value)
+    }
+}
+
+impl<'a> From<Enum<'a>> for PendingProcessing<'a> {
+    fn from(value: Enum<'a>) -> Self {
+        Self::Enum(value)
+    }
+}
+
+impl<'a> From<FunctionDeclaration<'a>> for PendingProcessing<'a> {
+    fn from(value: FunctionDeclaration<'a>) -> Self {
+        Self::Function(value)
+    }
+}
+
+impl<'a> From<Declaration<'a>> for PendingProcessing<'a> {
+    fn from(value: Declaration<'a>) -> Self {
+        match value {
+            Declaration::Enum(v) => v.into(),
+            Declaration::Function(v) => v.into(),
+            Declaration::Struct(v) => v.into(),
+        }
     }
 }
 
@@ -312,14 +355,31 @@ impl<'a> SymbolLoader for FunctionDeclaration<'a> {
                             b.call(f, args)?
                         }
                         Expression::Create(s, fs) => {
-                            let s = ctx.get_symbol_ref_from_name(s.as_ref()).or(Err("Function not defined"))?;
+                            let sn = s.as_ref();
+                            let s = ctx.get_symbol_ref_from_name(sn).or(Err(format!("Struct '{sn}' not defined")))?;
                             if !matches!(s.1, SymbolType::Struct) {
-                                return Err("Symbol isn't callable")?;
+                                return Err(format!("'{sn}' isn't a named struct"))?;
                             }
-                            let fs = fs
-                                .iter()
-                                .map(|(n, i)| Ok((n.as_ref().to_string(), visit_expr(b, ctx, v, i)?)))
-                                .collect::<Result<Vec<_>>>()?;
+                            let mut duplicates = BTreeSet::new();
+                            let mut initializers = BTreeMap::new();
+                            for (field, value) in fs {
+                                let field = field.as_ref();
+                                let value = visit_expr(b, ctx, v, value)?;
+                                if initializers.insert(field, value).is_some() {
+                                    duplicates.insert(field);
+                                }
+                            }
+                            if !duplicates.is_empty() {
+                                let duplicates = duplicates
+                                    .into_iter()
+                                    .collect::<Vec<_>>()
+                                    .join("', '");
+                                return Err(format!("Multiple initializers for fields '{duplicates}' while creating struct '{sn}'"))?;
+                            }
+                            let fs = initializers
+                                .into_iter()
+                                .map(|(n, v)| (n.to_owned(), v))
+                                .collect::<Vec<_>>();
                             b.create(s, fs)?
                         }
                     })
@@ -365,7 +425,9 @@ impl<'a> SymbolLoader for FunctionDeclaration<'a> {
         // let ret_type = type_to_value_kind(self.ret_type.unwrap_or(Type::Unit));
         let ret_type = type_ref_to_value_kind(&typ);
         if !ret_type.is_assignable_from(&body_type) {
-            return Err(format!("cannot return type `{body_type:?}` when function is declared to return type `{ret_type:?}`"))?;
+            let body_type = body_type.to_string(ctx);
+            let ret_type = ret_type.to_string(ctx);
+            return Err(format!("cannot return type `{body_type}` when function is declared to return type `{ret_type}`"))?;
         }
         Ok(FunctionDef {
             scope: Scope::from(self.visibility),
@@ -637,6 +699,13 @@ impl Module {
             .get(name.as_ref())
             .and_then(|(id, _)| self.symbols.get(*id as usize))
     }
+
+    pub fn get_ref_by_name(&self, name: &(impl AsRef<str> + ?Sized)) -> Option<SymbolRef> {
+        self.by_name
+            .get(name.as_ref())
+            .cloned()
+            .map(|(id, typ)| SymbolRef(id, typ))
+    }
 }
 
 impl LoaderContext for Module {
@@ -644,12 +713,13 @@ impl LoaderContext for Module {
         self.get_by_ref(r.clone())
     }
 
-    fn get_symbol_ref_from_name(&self, name: &str) -> Result<SymbolRef> {
+    fn get_symbol_ref_from_name(&self, name: &(impl AsRef<str> + ?Sized)) -> Result<SymbolRef> {
+        let name = name.as_ref();
         self.by_name
             .get(name)
             .cloned()
             .map(SymbolRef::from)
-            .ok_or_else(|| format!("Symbol not defined: {:?}", name).into())
+            .ok_or_else(|| format!("Symbol not defined: {name:}").into())
     }
 }
 
@@ -685,6 +755,12 @@ impl<'a> ModuleBuilder<'a> {
         if let Some((name, typ)) = name {
             self.module.by_name.insert(name, (id, typ));
         }
+    }
+
+    pub fn add_declaration<'b: 'a>(mut self, symbol: impl Into<PendingProcessing<'a>>) -> ModuleBuilder<'b>
+        where 'a: 'b {
+        self.allocate(symbol.into());
+        self
     }
 
     pub fn add_struct<'b: 'a>(mut self, symbol: Struct<'b>) -> ModuleBuilder<'b>
