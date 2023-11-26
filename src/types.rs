@@ -7,10 +7,12 @@ use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::cmp::Ordering;
 use core::fmt::{Debug, Display, Formatter};
 
 use crate::bytecode::{Body, ValueKind, ValueRef};
-use crate::parser::{BlockExpression, Declaration, Enum, Expression, Fields, FunctionDeclaration, Identifier, Struct, Type, Visibility};
+use crate::lexer::Token;
+use crate::parser::{BlockExpression, Declaration, Enum, Expression, Fields, FunctionDeclaration, Identifier, parse_declaration, Struct, Type, Visibility};
 
 type Result<T> = core::result::Result<T, Cow<'static, str>>;
 
@@ -46,9 +48,12 @@ impl ValueKind {
             ValueKind::Unit => "()".into(),
             ValueKind::Bool => "bool".into(),
             ValueKind::I64 => "i64".into(),
+            ValueKind::I16 => "i16".into(),
+            ValueKind::F64 => "f64".into(),
+            ValueKind::Usize => "usize".into(),
             ValueKind::Type(sr) => {
                 match ctx.get_symbol_from_ref(sr) {
-                    Ok(found) => found.name().unwrap_or("<unnamed type>").into(),
+                    Ok(found) => found.name().into(),
                     Err(e) => format!("<unresolved: {e}>")
                 }
             }
@@ -80,6 +85,18 @@ pub struct SymbolRef(u32, SymbolType);
 pub struct SymbolRef(pub u32, pub SymbolType);
 
 impl Eq for SymbolRef {}
+
+impl PartialOrd for SymbolRef {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        PartialOrd::partial_cmp(&self.0, &other.0)
+    }
+}
+
+impl Ord for SymbolRef {
+    fn cmp(&self, other: &Self) -> Ordering {
+        Ord::cmp(&self.0, &other.0)
+    }
+}
 
 impl PartialEq for SymbolRef {
     fn eq(&self, other: &Self) -> bool {
@@ -113,12 +130,12 @@ pub enum Symbol {
 }
 
 impl Symbol {
-    pub fn name(&self) -> Option<&str> {
-        Some(match self {
+    pub fn name(&self) -> &str {
+        match self {
             Symbol::Struct(sym) => sym.name.as_ref(),
             Symbol::Enum(sym) => sym.name.as_ref(),
             Symbol::Function(sym) => sym.name.as_ref(),
-        })
+        }
     }
 }
 
@@ -185,7 +202,8 @@ impl<'a> SymbolLoader for Struct<'a> {
         Ok(StructDef {
             scope: Scope::from(self.visibility),
             name: self.name.as_ref().to_string(),
-            fields: load_struct_fields(ctx, self.body)?,
+            fields: load_struct_fields(ctx, self.body)
+                .map_err(|e| format!("struct '{}': {e}", self.name.as_ref()))?,
         })
     }
 }
@@ -206,7 +224,8 @@ fn load_named_field(ctx: &impl LoaderContext, x: crate::parser::NamedField) -> R
     Ok(NamedField {
         scope: Scope::from(x.visibility),
         name: x.name.as_ref().to_string(),
-        typ: load_type(ctx, x.typ)?,
+        typ: load_type(ctx, x.typ)
+            .map_err(|e| format!("field '{}': {e}", x.name.as_ref()))?,
     })
 }
 
@@ -450,6 +469,9 @@ fn type_to_value_kind(typ: Type) -> ValueKind {
     match typ {
         Type::Unit => ValueKind::Unit,
         Type::I64 => ValueKind::I64,
+        Type::I16 => ValueKind::I16,
+        Type::F64 => ValueKind::F64,
+        Type::Usize => ValueKind::Usize,
         _ => ValueKind::Never
     }
 }
@@ -458,6 +480,9 @@ fn type_ref_to_value_kind(typ: &TypeRef) -> ValueKind {
     match typ {
         TypeRef::Primitive(PrimitiveType::Unit) => ValueKind::Unit,
         TypeRef::Primitive(PrimitiveType::I64) => ValueKind::I64,
+        TypeRef::Primitive(PrimitiveType::I16) => ValueKind::I16,
+        TypeRef::Primitive(PrimitiveType::F64) => ValueKind::F64,
+        TypeRef::Primitive(PrimitiveType::Usize) => ValueKind::Usize,
         TypeRef::Ref(sym) => ValueKind::Type(sym.clone()),
         _ => ValueKind::Never
     }
@@ -688,6 +713,14 @@ impl Module {
         &self.symbols
     }
 
+    pub fn symbols_ref(&self) -> Vec<(SymbolRef, &Symbol)> {
+        self.by_name
+            .values()
+            .cloned()
+            .map(|(id, typ)| (SymbolRef(id, typ), &self.symbols[id as usize]))
+            .collect()
+    }
+
     pub fn get_by_ref(&self, SymbolRef(id, _): SymbolRef) -> Result<&Symbol> {
         self.symbols
             .get(id as usize)
@@ -729,6 +762,19 @@ impl ResolverContext for Module {
     }
 }
 
+impl Module {
+    pub fn parse_tokens(
+        name: impl Into<String>,
+        mut tokens: Vec<Token>,
+    ) -> Result<Self> {
+        let mut b = ModuleBuilder::new(name);
+        while !tokens.is_empty() {
+            b = b.add_declaration(parse_declaration(&mut tokens)?)
+        }
+        b.build()
+    }
+}
+
 pub struct ModuleBuilder<'a> {
     module: Module,
     loading: Vec<PendingProcessing<'a>>,
@@ -736,7 +782,7 @@ pub struct ModuleBuilder<'a> {
 
 impl ModuleBuilder<'static> {
     pub fn new(name: impl Into<String>) -> Self {
-        ModuleBuilder {
+        Self {
             module: Module {
                 name: name.into(),
                 symbols: Default::default(),

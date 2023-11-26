@@ -55,6 +55,9 @@ pub enum ValueKind {
     Unit,
     Bool,
     I64,
+    I16,
+    F64,
+    Usize,
     Type(SymbolRef),
 }
 
@@ -66,11 +69,14 @@ impl ValueKind {
             ValueKind::Unit => matches!(*self, ValueKind::Never | ValueKind::Unit),
             ValueKind::Bool => matches!(*self, ValueKind::Never | ValueKind::Bool),
             ValueKind::I64 => matches!(*self, ValueKind::Never | ValueKind::I64),
+            ValueKind::I16 => matches!(*self, ValueKind::Never | ValueKind::I16),
+            ValueKind::F64 => matches!(*self, ValueKind::Never | ValueKind::F64),
+            ValueKind::Usize => matches!(*self, ValueKind::Never | ValueKind::Usize),
             ValueKind::Type(t) => if let ValueKind::Type(f) = self {
                 *f == *t
             } else {
                 false
-            }
+            },
         }
     }
 
@@ -81,12 +87,26 @@ impl ValueKind {
             ValueKind::Unit => matches!(*self, ValueKind::Unit),
             ValueKind::Bool => matches!(*self, ValueKind::Bool),
             ValueKind::I64 => matches!(*self, ValueKind::I64),
+            ValueKind::I16 => matches!(*self, ValueKind::I16),
+            ValueKind::F64 => matches!(*self, ValueKind::F64),
+            ValueKind::Usize => matches!(*self, ValueKind::Usize),
             ValueKind::Type(t) => if let ValueKind::Type(f) = src {
                 *f == *t
             } else {
                 false
-            }
+            },
         }
+    }
+
+    pub fn is_number(&self) -> bool {
+        matches!(
+            self,
+            ValueKind::Never |
+            ValueKind::I64 |
+            ValueKind::I16 |
+            ValueKind::F64 |
+            ValueKind::Usize
+        )
     }
 }
 
@@ -219,24 +239,24 @@ impl Body {
     }
 
     pub fn neg(&mut self, value: ValueRef) -> Result<ValueRef> {
-        if !matches!(value.kind, ValueKind::I64) {
-            Err("arithmetic operation requires a numeric operand")?;
+        if !value.kind.is_number() {
+            Err(format!("arithmetic operation requires a numeric operand; got {:?}", value.kind))?;
         }
 
         self.push(Op::Neg(value), ValueKind::I64)
     }
 
     pub fn add(&mut self, left: ValueRef, right: ValueRef) -> Result<ValueRef> {
-        if !(matches!(left.kind, ValueKind::I64) && matches!(right.kind, ValueKind::I64)) {
-            Err("arithmetic operation requires numeric operands")?;
+        if !(left.kind.is_number() && right.kind.is_number()) {
+            Err(format!("arithmetic operation requires a numeric operand; got {:?} and {:?}", left.kind, right.kind))?;
         }
 
         self.push(Op::Add(left, right), ValueKind::I64)
     }
 
     pub fn mul(&mut self, left: ValueRef, right: ValueRef) -> Result<ValueRef> {
-        if !(matches!(left.kind, ValueKind::I64) && matches!(right.kind, ValueKind::I64)) {
-            Err("arithmetic operation requires numeric operands")?;
+        if !(left.kind.is_number() && right.kind.is_number()) {
+            Err(format!("arithmetic operation requires a numeric operand; got {:?} and {:?}", left.kind, right.kind))?;
         }
 
         self.push(Op::Mul(left, right), ValueKind::I64)
@@ -254,8 +274,8 @@ impl Body {
     }
 
     pub fn gt(&mut self, left: ValueRef, right: ValueRef) -> Result<ValueRef> {
-        if !(matches!(left.kind, ValueKind::I64) && matches!(right.kind, ValueKind::I64)) {
-            Err("arithmetic comparison requires numeric operands")?;
+        if !(left.kind.is_number() && right.kind.is_number()) {
+            Err(format!("arithmetic operation requires a numeric operand; got {:?} and {:?}", left.kind, right.kind))?;
         }
 
         self.push(Op::Gt(left, right), ValueKind::Bool)
@@ -295,17 +315,20 @@ impl Body {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Composed {
     Struct(Vec<Value>),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Value {
     Never,
     Unit,
     Bool(bool),
     I64(i64),
+    I16(i16),
+    F64(f64),
+    Usize(usize),
     Composed(Composed, SymbolRef),
 }
 
@@ -330,6 +353,9 @@ impl Value {
             ValueKind::Unit => matches!(self, Value::Never | Value::Unit),
             ValueKind::Bool => matches!(self, Value::Never | Value::Bool(_)),
             ValueKind::I64 => matches!(self, Value::Never | Value::I64(_)),
+            ValueKind::I16 => matches!(self, Value::Never | Value::I16(_)),
+            ValueKind::F64 => matches!(self, Value::Never | Value::F64(_)),
+            ValueKind::Usize => matches!(self, Value::Never | Value::Usize(_)),
             ValueKind::Type(t) => if let Value::Composed(_, f) = self {
                 *f == *t
             } else {

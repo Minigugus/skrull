@@ -36,7 +36,7 @@ impl ToRustPrintable for SymbolRef {
         match ctx.resolve(self.clone()) {
             Err(err) => write!(f, "<unresolved: {err}>"),
             // Ok(Symbol::Struct(sym)) => write!(f, "{}", sym.name),
-            Ok(other) => if let Some(name) = other.name() {
+            Ok(other) => if let Some(name) = Some(other.name()) {
                 write!(f, "{name}")
             } else {
                 write!(f, "<unnamed #{}>", self)
