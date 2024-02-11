@@ -397,7 +397,7 @@ impl JavaModule {
 fn it_generates_java() -> Result<(), Cow<'static, str>> {
     use crate::lexer::Token;
 
-    let module = Module::parse_tokens("my_first_module", Token::parse_ascii(r#"
+    let module = Module::parse_tokens("my_first_module", /*language=rust*/Token::parse_ascii(r#"
 fn new_point(x: i16, y: i16) -> Point {
   Point {
     x,
@@ -431,7 +431,7 @@ enum Shape {
 
     assert_eq!(
         java.resolve("my_first_module.Shape").map(ToString::to_string),
-        Some(r#"package my_first_module;
+        /*language=java*/Some(r#"package my_first_module;
 
 sealed interface Shape {}
 
@@ -442,7 +442,7 @@ public record Rect(
 
     assert_eq!(
         java.resolve("my_first_module.Size").map(ToString::to_string),
-        Some(r#"package my_first_module;
+        /*language=java*/Some(r#"package my_first_module;
 
 public record Size(
   short width,
@@ -452,7 +452,7 @@ public record Size(
 
     assert_eq!(
         java.resolve("my_first_module.Point").map(ToString::to_string),
-        Some(r#"package my_first_module;
+        /*language=java*/Some(r#"package my_first_module;
 
 record Point(
   short x,
@@ -462,7 +462,7 @@ record Point(
 
     assert_eq!(
         java.resolve("my_first_module.Rectangle").map(ToString::to_string),
-        Some(r#"package my_first_module;
+        /*language=java*/Some(r#"package my_first_module;
 
 record Rectangle(
   my_first_module.Point origin,
@@ -532,10 +532,9 @@ record Rectangle(
 
 #[test]
 fn it_transform_enum() -> Result<(), Cow<'static, str>> {
-    use crate::lexer::TokenKind::*;
 
     // tokenize
-    let tokens = Token::parse_ascii(r#"pub enum Price {
+    let tokens = /*language=rust*/Token::parse_ascii(r#"pub enum Price {
   Limit,
   Market,
   StopLimit { stop_price: f64, },
@@ -557,7 +556,7 @@ fn it_transform_enum() -> Result<(), Cow<'static, str>> {
 
     assert_eq!(
         java.resolve("skull_test_transform_enum.Price").map(ToString::to_string),
-        Some(r#"package skull_test_transform_enum;
+        /*language=java*/Some(r#"package skull_test_transform_enum;
 
 public sealed interface Price {}
 

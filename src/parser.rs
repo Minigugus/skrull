@@ -433,8 +433,6 @@ pub fn parse_low_expression<'a>(narrowed: bool, tokens: &mut Vec<Token<'a>>) -> 
     }
 }
 
-// struct A { b: () }
-
 pub fn parse_middle_low_expression<'a>(narrowed: bool, tokens: &mut Vec<Token<'a>>) -> Result<Expression<'a>> {
     let mut prev = parse_low_expression(narrowed, tokens)?;
     loop {
@@ -598,7 +596,7 @@ fn it_tokenize_struct_with_keywords_as_identifiers() -> Result<()> {
 
 #[test]
 fn it_tokenize_enum() -> Result<()> {
-    let mut tokens = Token::parse_ascii(r#"pub enum TokenKind {
+    let mut tokens = /*language=rust*/Token::parse_ascii(r#"pub enum TokenKind {
     Equal,
     Unexpected { character: char }
 }"#)?;
@@ -634,7 +632,7 @@ fn it_tokenize_enum() -> Result<()> {
 
 #[test]
 fn it_tokenize_block_expression() -> Result<()> {
-    let mut tokens = Token::parse_ascii(r#"{
+    let mut tokens = /*language=rust*/Token::parse_ascii(r#"{
         2 + --3 + 5
     }"#)?;
 
@@ -661,7 +659,7 @@ fn it_tokenize_block_expression() -> Result<()> {
 
 #[test]
 fn it_tokenize_function_declaration() -> Result<()> {
-    let mut tokens = Token::parse_ascii(r#"pub fn ten(mut a: u32) {
+    let mut tokens = /*language=rust*/Token::parse_ascii(r#"pub fn ten(mut a: u32) {
         2 + 3 + 5
     }"#)?;
 

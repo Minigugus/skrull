@@ -541,6 +541,8 @@ fn it_works() -> Result<()> {
 #[test]
 fn it_prints_functions_in_rust() -> Result<()> {
     use crate::lexer::Token;
+
+    //language=rust
     let mut tokens = Token::parse_ascii(r#"
 pub fn life(mut a: i64) -> i64 {
   40 + 2 * if a > 40 { (1) + { (4) } } else { 0 }
@@ -568,6 +570,8 @@ pub fn life(mut a: i64) -> i64 {
 #[test]
 fn it_runs_recursive_fibonacci() -> Result<()> {
     use crate::lexer::Token;
+
+    //language=rust
     let mut tokens = Token::parse_ascii(r#"
 pub fn fib(n: i64) -> i64 {
   if 2 > n {
@@ -600,6 +604,7 @@ pub fn fib(n: i64) -> i64 {
 fn it_runs_fn_with_composed_types() -> Result<()> {
     use crate::lexer::Token;
 
+    //language=rust
     let mut tokens = Token::parse_ascii(r#"
 fn new_point(x: i64, y: i64) -> Point {
   Point {
