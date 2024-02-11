@@ -115,20 +115,25 @@ enum Op {
     Label(ValueRef, String),
     ConstUnit,
     ConstI64(i64),
-    Block((Vec<ValueRef>, Box<Body>)),
+    Block((Box<[ValueRef]>, Box<Body>)),
     Neg(ValueRef),
     Add(ValueRef, ValueRef),
     Mul(ValueRef, ValueRef),
     Gt(ValueRef, ValueRef),
-    If(ValueRef, (Vec<ValueRef>, Box<Body>), (Vec<ValueRef>, Box<Body>)),
-    Call(SymbolRef, Vec<ValueRef>),
-    Create(SymbolRef, Vec<(String, ValueRef)>),
+    If(ValueRef, (Box<[ValueRef]>, Box<Body>), (Box<[ValueRef]>, Box<Body>)),
+    Call(SymbolRef, Box<[ValueRef]>),
+    Create(SymbolRef, Box<[(String, ValueRef)]>),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum TerminatorOp {
     Yield(ValueRef),
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Body {
     ops: Vec<Op>,
+    terminator_op: Option<TerminatorOp>,
     params: Vec<ValueKind>,
     nb_params: usize,
     next_ref_id: usize,
@@ -138,7 +143,7 @@ pub struct Body {
 impl Body {
     pub fn new_with_dyn_params(
         params: &[ValueKind],
-        ops: impl FnOnce(&mut Body, &[ValueRef]) -> Result<()>,
+        ops: impl FnOnce(&mut Body, &[ValueRef]) -> Result<TerminatorOp>,
     ) -> Result<Self> {
         let mut i = 0usize;
         let param_refs = params
@@ -156,12 +161,14 @@ impl Body {
             .collect::<Vec<_>>();
         let mut body = Self {
             ops: Default::default(),
+            terminator_op: None,
             params: param_refs.iter().map(|v| v.kind.clone()).collect(),
             nb_params: 0,
             next_ref_id: 0,
             ret_kind: None,
         };
-        (ops)(&mut body, &param_refs)?;
+        let terminator_op = (ops)(&mut body, &param_refs)?;
+        body.terminator_op = Some(terminator_op);
         Ok(body)
     }
 
@@ -178,6 +185,7 @@ impl Body {
         });
         (Self {
             ops: Default::default(),
+            terminator_op: None,
             params: param_refs.iter().map(|v| v.kind.clone()).collect(),
             nb_params: 0,
             next_ref_id: 0,
@@ -187,25 +195,28 @@ impl Body {
 
     fn new_with_params_and_ops<const N: usize>(
         params: &[ValueKind; N],
-        ops: impl FnOnce(&mut Body, [ValueRef; N]) -> Result<()>,
+        ops: impl FnOnce(&mut Body, [ValueRef; N]) -> Result<TerminatorOp>,
     ) -> Result<Self> {
         let (mut body, params) = Self::new_with_params(params);
-        (ops)(&mut body, params)?;
+        let terminator_op = (ops)(&mut body, params)?;
+        body.terminator_op = Some(terminator_op);
         Ok(body)
     }
 
     pub fn derive(
         &self,
-        ops: impl FnOnce(&mut Body) -> Result<Vec<ValueRef>>,
-    ) -> Result<(Vec<ValueRef>, Box<Body>)> {
+        ops: impl FnOnce(&mut Body) -> Result<(Box<[ValueRef]>, TerminatorOp)>,
+    ) -> Result<(Box<[ValueRef]>, Box<Body>)> {
         let mut body = Self {
             ops: Default::default(),
+            terminator_op: None,
             params: Default::default(),
             nb_params: 0,
             next_ref_id: 0,
             ret_kind: None,
         };
-        let params = (ops)(&mut body)?;
+        let (params, terminal_op) = (ops)(&mut body)?;
+        body.terminator_op = Some(terminal_op);
         body.params = params.iter().map(|r| r.kind.clone()).collect();
         Ok((params, Box::new(body)))
     }
@@ -256,13 +267,13 @@ impl Body {
 
     pub fn mul(&mut self, left: ValueRef, right: ValueRef) -> Result<ValueRef> {
         if !(left.kind.is_number() && right.kind.is_number()) {
-            Err(format!("arithmetic operation requires a numeric operand; got {:?} and {:?}", left.kind, right.kind))?;
+            Err(format!("arithmetic operation requires numeric operands; got {:?} and {:?}", left.kind, right.kind))?;
         }
 
         self.push(Op::Mul(left, right), ValueKind::I64)
     }
 
-    pub fn yield_expr(&mut self, value: ValueRef) -> Result<ValueRef> {
+    pub fn yield_expr(&mut self, value: ValueRef) -> Result<TerminatorOp> {
         if let Some(kind) = &self.ret_kind {
             if *kind != value.kind {
                 Err("return statements must have the same type")?;
@@ -270,7 +281,7 @@ impl Body {
         }
 
         self.ret_kind = Some(value.kind.clone());
-        self.push(Op::Yield(value), ValueKind::Never)
+        Ok(TerminatorOp::Yield(value))
     }
 
     pub fn gt(&mut self, left: ValueRef, right: ValueRef) -> Result<ValueRef> {
@@ -281,7 +292,7 @@ impl Body {
         self.push(Op::Gt(left, right), ValueKind::Bool)
     }
 
-    pub fn block(&mut self, block: (Vec<ValueRef>, Box<Body>)) -> Result<ValueRef> {
+    pub fn block(&mut self, block: (Box<[ValueRef]>, Box<Body>)) -> Result<ValueRef> {
         let kind = block.1.ret_kind.clone().unwrap_or(ValueKind::Unit);
         self.push(Op::Block(block), kind)
     }
@@ -289,8 +300,8 @@ impl Body {
     pub fn if_expr(
         &mut self,
         cond: ValueRef,
-        on_true: (Vec<ValueRef>, Box<Body>),
-        on_false: (Vec<ValueRef>, Box<Body>),
+        on_true: (Box<[ValueRef]>, Box<Body>),
+        on_false: (Box<[ValueRef]>, Box<Body>),
     ) -> Result<ValueRef> {
         if !matches!(cond.kind, ValueKind::Bool) {
             Err("conditional expression requires a boolean operand")?;
@@ -304,12 +315,12 @@ impl Body {
         self.push(Op::If(cond, on_true, on_false), kind)
     }
 
-    pub fn call(&mut self, func: SymbolRef, args: impl Into<Vec<ValueRef>>) -> Result<ValueRef> {
+    pub fn call(&mut self, func: SymbolRef, args: impl Into<Box<[ValueRef]>>) -> Result<ValueRef> {
         let Some(k) = func.typ().as_function_return_type() else { return Err("symbol isn't callable")?; };
         self.push(Op::Call(func, args.into()), k)
     }
 
-    pub fn create(&mut self, struct_ref: SymbolRef, fields: impl Into<Vec<(String, ValueRef)>>) -> Result<ValueRef> {
+    pub fn create(&mut self, struct_ref: SymbolRef, fields: impl Into<Box<[(String, ValueRef)]>>) -> Result<ValueRef> {
         let kind = ValueKind::Type(struct_ref.clone());
         self.push(Op::Create(struct_ref, fields.into()), kind)
     }
@@ -411,7 +422,6 @@ fn eval(ctx: &impl ResolverContext, body: &Body, params: &[Value]) -> Result<Val
                 Value::I64(l * r)
             }
 
-            Op::Yield(v) => return Ok(heap.get(v).ok_or("invalid ref in Return op")?.clone()),
             Op::Gt(l, r) => {
                 let l = heap.get(l).ok_or("invalid ref in Gt op")?.to_i16()?;
                 let r = heap.get(r).ok_or("invalid ref in Gt op")?.to_i16()?;
@@ -489,6 +499,11 @@ fn eval(ctx: &impl ResolverContext, body: &Body, params: &[Value]) -> Result<Val
             }
         });
     }
+    if let Some(op) = &body.terminator_op {
+        match op {
+            TerminatorOp::Yield(ref v) => return heap.get(v).ok_or("invalid ref in Yield terminator op".into())
+        }
+    }
     Err("missing Return op")?
 }
 
@@ -497,8 +512,7 @@ fn it_works() -> Result<()> {
     let on_true = Body::new_with_params_and_ops(
         &[ValueKind::I64],
         |body, [_1]| {
-            body.yield_expr(_1)?;
-            Ok(())
+            body.yield_expr(_1)
         },
     )?;
 
@@ -506,8 +520,7 @@ fn it_works() -> Result<()> {
         &[],
         |body, []| {
             let _1 = body.const_i64(0)?;
-            body.yield_expr(_1)?;
-            Ok(())
+            body.yield_expr(_1)
         },
     )?;
 
@@ -521,9 +534,8 @@ fn it_works() -> Result<()> {
             let _6 = body.label(_5.clone(), "y")?;
             let _7 = body.const_i64(0)?;
             let _8 = body.gt(_5, _7)?;
-            let _9 = body.if_expr(_8, (vec![_6], Box::new(on_true)), (vec![], Box::new(on_false)))?;
-            let _a = body.yield_expr(_9)?;
-            Ok(())
+            let _9 = body.if_expr(_8, (vec![_6].into_boxed_slice(), Box::new(on_true)), (vec![].into_boxed_slice(), Box::new(on_false)))?;
+            body.yield_expr(_9)
         },
     )?;
 

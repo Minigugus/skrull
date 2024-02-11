@@ -10,7 +10,7 @@ use core::cell::RefCell;
 use core::cmp::Ordering;
 use core::fmt::{Debug, Display, Formatter};
 
-use crate::bytecode::{Body, ValueKind, ValueRef};
+use crate::bytecode::{Body, TerminatorOp, ValueKind, ValueRef};
 use crate::lexer::Token;
 use crate::parser::{BlockExpression, Declaration, Enum, Expression, Fields, FunctionDeclaration, Identifier, parse_declaration, Struct, Type, Visibility};
 
@@ -404,7 +404,7 @@ impl<'a> SymbolLoader for FunctionDeclaration<'a> {
                     })
                 }
 
-                fn visit_block_inner(b: &mut Body, ctx: &impl LoaderContext, v: &dyn Scope, e: &BlockExpression) -> Result<()> {
+                fn visit_block_inner(b: &mut Body, ctx: &impl LoaderContext, v: &dyn Scope, e: &BlockExpression) -> Result<TerminatorOp> {
                     for e in &e.expressions {
                         visit_expr(b, ctx, v, e)?;
                     }
@@ -414,29 +414,26 @@ impl<'a> SymbolLoader for FunctionDeclaration<'a> {
                         b.const_unit()?
                     };
 
-                    b.yield_expr(remainder)?;
-
-                    Ok(())
+                    Ok(b.yield_expr(remainder)?)
                 }
 
-                fn visit_block(b: &mut Body, ctx: &impl LoaderContext, v: &dyn Scope, e: &BlockExpression) -> Result<(Vec<ValueRef>, Box<Body>)> {
+                fn visit_block(b: &mut Body, ctx: &impl LoaderContext, v: &dyn Scope, e: &BlockExpression) -> Result<(Box<[ValueRef]>, Box<Body>)> {
                     b.derive(|b| {
                         let ns = BlockScope(v, RefCell::new(Default::default()));
 
-                        visit_block_inner(b, ctx, &ns, e)?;
+                        let terminator_op = visit_block_inner(b, ctx, &ns, e)?;
 
-                        Ok(
+                        Ok((
                             ns.1.take()
                                 .keys()
                                 .cloned()
-                                .collect()
-                        )
+                                .collect(),
+                            terminator_op
+                        ))
                     })
                 }
 
-                visit_block_inner(b, ctx, &params, &self.body)?;
-
-                Ok(())
+                visit_block_inner(b, ctx, &params, &self.body)
             },
         )?;
         let typ = self.ret_type.map(|t| load_type(ctx, t)).unwrap_or(Ok(TypeRef::Primitive(PrimitiveType::Unit)))?;
