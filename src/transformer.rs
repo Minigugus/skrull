@@ -129,11 +129,12 @@ impl Display for JavaSealedInterface {
             name,
             permitted
         } = self;
-        write!(f, "{visibility}sealed interface {name} {{}}\n")?;
+        write!(f, "{visibility}sealed interface {name} {{\n")?;
         let mut permitted = permitted.iter();
         while let Some(variant) = permitted.next() {
             write!(f, "\n{variant}")?;
         }
+        write!(f, "\n\n}}\n")?;
         Ok(())
     }
 }
@@ -314,7 +315,7 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
                         permitted: e.variants()
                             .iter()
                             .map(|v| JavaRecord {
-                                visibility: JavaVisibility::Public,
+                                visibility: JavaVisibility::PackagePrivate,
                                 name: v.name().to_string(),
                                 implements: Some(builder.by_fqdn
                                     .get(&*fqdn)
@@ -433,11 +434,14 @@ enum Shape {
         java.resolve("my_first_module.Shape").map(ToString::to_string),
         /*language=java*/Some(r#"package my_first_module;
 
-sealed interface Shape {}
+sealed interface Shape {
 
-public record Rect(
+record Rect(
   my_first_module.Rectangle _0
-) implements my_first_module.Shape { }"#.to_string())
+) implements my_first_module.Shape { }
+
+}
+"#.to_string())
     );
 
     assert_eq!(
@@ -540,12 +544,12 @@ fn it_transform_enum() -> Result<(), Cow<'static, str>> {
   StopLimit { stop_price: f64, },
 }
 
-// pub fn is_priced(price: Price) -> bool {
-//   match price {
-//     Price::Limit | Price::StopLimit => true,
-//     _ => false
-//   }
-// }
+pub fn is_priced(price: Price) -> bool {
+  match price {
+    Price::Limit | Price::StopLimit => true,
+    _ => false
+  }
+}
 "#)?;
 
     // parse + semantic analysis
@@ -558,13 +562,16 @@ fn it_transform_enum() -> Result<(), Cow<'static, str>> {
         java.resolve("skull_test_transform_enum.Price").map(ToString::to_string),
         /*language=java*/Some(r#"package skull_test_transform_enum;
 
-public sealed interface Price {}
+public sealed interface Price {
 
-public record Limit() implements skull_test_transform_enum.Price { }
-public record Market() implements skull_test_transform_enum.Price { }
-public record StopLimit(
+record Limit() implements skull_test_transform_enum.Price { }
+record Market() implements skull_test_transform_enum.Price { }
+record StopLimit(
   double stop_price
-) implements skull_test_transform_enum.Price { }"#.to_string())
+) implements skull_test_transform_enum.Price { }
+
+}
+"#.to_string())
     );
 
     Ok(())
