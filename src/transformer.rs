@@ -544,10 +544,12 @@ fn it_transform_enum() -> Result<(), Cow<'static, str>> {
   StopLimit { stop_price: f64, },
 }
 
-pub fn is_priced(price: Price) -> bool {
-  match price {
-    Price::Limit | Price::StopLimit => true,
-    _ => false
+struct Some(Price);
+
+pub fn is_priced(maybe_price: Some) -> i16 {
+  match maybe_price {
+    Some(Price::Limit | Price::StopLimit) => 1,
+    _ => 0
   }
 }
 "#)?;
@@ -572,6 +574,15 @@ record StopLimit(
 
 }
 "#.to_string())
+    );
+
+    assert_eq!(
+        java.resolve("skull_test_transform_enum.Some").map(ToString::to_string),
+        /*language=java*/Some(r#"package skull_test_transform_enum;
+
+record Some(
+  skull_test_transform_enum.Price _0
+) { }"#.to_string())
     );
 
     Ok(())

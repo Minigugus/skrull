@@ -82,15 +82,50 @@ impl FromKeywordList for Mutability {
 #[derive(Eq, PartialEq, Debug)]
 pub struct BlockExpression<'a> {
     pub expressions: Vec<Expression<'a>>,
-    pub remainder: Option<Expression<'a>>,
+    pub remainder: Option<Rc<Expression<'a>>>,
 }
 
 #[derive(Eq, PartialEq, Debug)]
+pub struct MatchExpression<'a> {
+    pub expression: Rc<Expression<'a>>,
+    pub cases: Vec<MatchCase<'a>>,
+}
+
+#[derive(Eq, PartialEq, Debug)]
+pub struct MatchCase<'a> {
+    pub pattern: Rc<MatchPattern<'a>>,
+    pub body: Rc<Expression<'a>>,
+    pub guard: Option<Rc<Expression<'a>>>,
+}
+
+#[derive(Eq, PartialEq, Debug)]
+pub struct Qualifier<'a> {
+    // Path { container: Identifier<'a>, left: Rc<Qualifier<'a>> },
+    // Type(Identifier<'a>),
+    pub parent: Option<Rc<Qualifier<'a>>>,
+    pub segment: Identifier<'a>,
+}
+
+#[derive(Eq, PartialEq, Debug)]
+pub enum MatchPattern<'a> {
+    Unit,
+    Wildcard,
+    Variable(Identifier<'a>),
+    Union(Vec<MatchPattern<'a>>),
+    NumberLiteral(i64),
+    StringLiteral(&'a str),
+    IsEnumOrType(Qualifier<'a>),
+    TupleStruct { typ: Qualifier<'a>, params: Vec<MatchPattern<'a>>, exact: bool },
+    FieldStruct { typ: Qualifier<'a>, params: Vec<(Identifier<'a>, MatchPattern<'a>)>, exact: bool },
+}
+
+#[derive(Clone, Eq, PartialEq, Debug)]
 pub enum Expression<'a> {
     Unit,
     Literal(i64),
     Identifier(Identifier<'a>),
     Block(Rc<BlockExpression<'a>>),
+    Match(Rc<MatchExpression<'a>>),
     Neg(Rc<Expression<'a>>),
     Add(Rc<Expression<'a>>, Rc<Expression<'a>>),
     Mul(Rc<Expression<'a>>, Rc<Expression<'a>>),
@@ -210,18 +245,34 @@ fn parse_group<'a, T, F: Fn(&mut Vec<Token<'a>>) -> Result<T>>(
     open: TokenKind,
     close: TokenKind,
 ) -> Result<Vec<T>> {
-    let mut items = vec![];
+    parse_optional_group_with_dotdot(tokens, parse, open, close)
+        .unwrap_or_expected_at(tokens, "expected an opening token")
+        .map(|(v, _)| v)
+}
 
-    eat_token(tokens, open).unwrap_or_expected_at(tokens, "expected an opening token")?;
+fn parse_optional_group_with_dotdot<'a, T, F: Fn(&mut Vec<Token<'a>>) -> Result<T>>(
+    tokens: &mut Vec<Token<'a>>,
+    parse: F,
+    open: TokenKind,
+    close: TokenKind
+) -> Result<(Option<(Vec<T>, bool)>)> {
+    if !eat_token(tokens, open).is_some() {
+        return Ok(None);
+    }
+
+    let mut items = vec![];
+    let mut dotdot_at_end = false;
+
     while !eat_token(tokens, close).is_some() {
         items.push(parse(tokens)?);
         if !eat_token(tokens, Comma).is_some() {
+            dotdot_at_end = eat_token(tokens, DotDot).is_some();
             eat_token(tokens, close).unwrap_or_expected_at(tokens, "expected a comma or closing token")?;
             break;
         }
     }
 
-    Ok(items)
+    Ok(Some((items, dotdot_at_end)))
 }
 
 fn parse_visibility(tokens: &mut Vec<Token>) -> Visibility {
@@ -240,6 +291,39 @@ fn parse_identifier<'a>(tokens: &mut Vec<Token<'a>>) -> Option<Identifier<'a>> {
     } else {
         None
     }
+}
+
+// fn parse_qualifier<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Qualifier<'a>> {
+//     let segment = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected an identifier")?;
+//     Ok(if !eat_token(tokens, ColonColon).is_some() {
+//         Qualifier::Type(segment)
+//     } else {
+//         Qualifier::Path { container: segment, left: Rc::new(parse_qualifier(tokens)?) }
+//     })
+// }
+
+fn parse_qualifier_inner<'a>(segment: Identifier<'a>, parent: Option<Rc<Qualifier<'a>>>, tokens: &mut Vec<Token<'a>>) -> Result<Qualifier<'a>> {
+    let qualifier = Qualifier {
+        parent,
+        segment,
+    };
+    Ok(if !eat_token(tokens, ColonColon).is_some() {
+        qualifier
+    } else {
+        parse_qualifier_inner(
+            parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected an identifier")?,
+            Some(Rc::new(qualifier)),
+            tokens
+        )?
+    })
+}
+
+fn parse_qualifier<'a>(segment: Identifier<'a>, tokens: &mut Vec<Token<'a>>) -> Result<Qualifier<'a>> {
+    parse_qualifier_inner(
+        segment,
+        None,
+        tokens
+    )
 }
 
 fn parse_identifier_and_keywords<'a, T: FromKeywordList>(
@@ -326,6 +410,9 @@ fn parse_struct_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility) -
     eat_token(tokens, Symbol("struct")).unwrap_or_expected_at(tokens, "expected the struct keyword")?;
     let name = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected a struct name")?;
     let body = parse_fields(tokens)?;
+    if !matches!(body, Fields::NamedFields(_)) {
+        eat_token(tokens, Semicolon).unwrap_or_expected("expected `;` after struct declaration")?;
+    }
 
     Ok(StructOrEnum {
         visibility,
@@ -382,6 +469,82 @@ pub fn parse_field_init<'a>(tokens: &mut Vec<Token<'a>>) -> Result<(Identifier<'
     Ok((name, init))
 }
 
+pub fn parse_match_field_pattern<'a>(tokens: &mut Vec<Token<'a>>) -> Result<(Identifier<'a>, MatchPattern<'a>)> {
+    let name = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected a field name")?;
+    let pattern = if eat_token(tokens, Colon).is_some() {
+        parse_match_pattern(tokens)?
+    } else {
+        MatchPattern::Variable(name.clone())
+    };
+
+    Ok((name, pattern))
+}
+
+pub fn parse_match_pattern_without_union<'a>(tokens: &mut Vec<Token<'a>>) -> Result<MatchPattern<'a>> {
+    if eat_token(tokens, Underscore).is_some() {
+        return Ok(MatchPattern::Wildcard);
+    }
+
+    let typ = match tokens.remove(0).kind {
+        Symbol(name) => parse_qualifier(Identifier(name), tokens)?,
+        Number(n) => return Ok(MatchPattern::NumberLiteral(n)),
+        _ => return Err("expected a match pattern")?
+    };
+
+    Ok(if let Some((params, exact)) = parse_optional_group_with_dotdot(tokens, parse_match_pattern, ParenthesisOpen, ParenthesisClose)? {
+        MatchPattern::TupleStruct {
+            typ,
+            params,
+            exact,
+        }
+    } else if let Some((params, exact)) = parse_optional_group_with_dotdot(tokens, parse_match_field_pattern, BraceOpen, BraceClose)? {
+        MatchPattern::FieldStruct {
+            typ,
+            params,
+            exact,
+        }
+    } else if typ.parent.is_none() {
+        MatchPattern::Variable(typ.segment)
+    } else {
+        MatchPattern::IsEnumOrType(typ)
+    })
+}
+
+pub fn parse_match_pattern<'a>(tokens: &mut Vec<Token<'a>>) -> Result<MatchPattern<'a>> {
+    let mut prev = parse_match_pattern_without_union(tokens)?;
+    if eat_token(tokens, Pipe).is_none() {
+        return Ok(prev);
+    }
+    let mut patterns = vec![prev];
+    loop {
+        patterns.push(parse_match_pattern_without_union(tokens)?);
+        if eat_token(tokens, Pipe).is_none() {
+            break;
+        }
+    }
+    return Ok(MatchPattern::Union(patterns));
+}
+
+pub fn parse_match_case<'a>(tokens: &mut Vec<Token<'a>>) -> Result<MatchCase<'a>> {
+    let pattern = parse_match_pattern(tokens)?;
+
+    let guard = if eat_token(tokens, Symbol("if")).is_some() {
+        Some(Rc::new(parse_expression(false, tokens)?))
+    } else {
+        None
+    };
+
+    eat_token(tokens, DoubleArrow).unwrap_or_expected_at(tokens, "expected a double arrow `=>`")?;
+
+    let body = parse_expression(false, tokens)?;
+
+    Ok(MatchCase {
+        pattern: Rc::new(pattern),
+        body: Rc::new(body),
+        guard,
+    })
+}
+
 pub fn parse_low_expression<'a>(narrowed: bool, tokens: &mut Vec<Token<'a>>) -> Result<Expression<'a>> {
     if let Some(BraceOpen) = peek_token(tokens) {
         return Ok(Expression::Block(Rc::new(parse_block_expression(tokens)?)));
@@ -412,6 +575,17 @@ pub fn parse_low_expression<'a>(narrowed: bool, tokens: &mut Vec<Token<'a>>) -> 
                 Rc::new(on_true),
                 Rc::new(on_false),
             ))
+        }
+        Symbol("match") => {
+            let expr = parse_expression(true, tokens)
+                .when_parsing("a `match` expression")?;
+            let cases = parse_group(tokens, parse_match_case, BraceOpen, BraceClose)
+                .when_parsing("a `match` case")
+                .currently_at(tokens)?;
+            Ok(Expression::Match(Rc::new(MatchExpression {
+                expression: Rc::new(expr),
+                cases,
+            })))
         }
         Symbol(n) => {
             let identifier = Identifier(n);
@@ -488,7 +662,7 @@ pub fn parse_block_expression<'a>(tokens: &mut Vec<Token<'a>>) -> Result<BlockEx
         if eat_token(tokens, Semicolon).is_some() {
             expressions.push(expr);
         } else {
-            remainder = Some(expr);
+            remainder = Some(Rc::new(expr));
             eat_token(tokens, BraceClose)
                 .unwrap_or_expected_at(tokens, "expected a semi-colon or closing brace")
                 .currently_at(tokens)?;
@@ -641,7 +815,7 @@ fn it_tokenize_block_expression() -> Result<()> {
     assert_eq!(
         BlockExpression {
             expressions: vec![],
-            remainder: Some(Expression::Add(Rc::new(
+            remainder: Some(Rc::new(Expression::Add(Rc::new(
                 Expression::Add(Rc::new(
                     Expression::Literal(2)
                 ), Rc::new(
@@ -649,7 +823,7 @@ fn it_tokenize_block_expression() -> Result<()> {
                 ))
             ), Rc::new(
                 Expression::Literal(5)
-            ))),
+            )))),
         },
         root
     );
@@ -677,7 +851,7 @@ fn it_tokenize_function_declaration() -> Result<()> {
             ret_type: None,
             body: BlockExpression {
                 expressions: vec![],
-                remainder: Some(Expression::Add(Rc::new(
+                remainder: Some(Rc::new(Expression::Add(Rc::new(
                     Expression::Add(Rc::new(
                         Expression::Literal(2)
                     ), Rc::new(
@@ -685,7 +859,7 @@ fn it_tokenize_function_declaration() -> Result<()> {
                     ))
                 ), Rc::new(
                     Expression::Literal(5)
-                ))),
+                )))),
             },
         },
         root

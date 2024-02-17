@@ -7,8 +7,8 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt::{Debug, Formatter};
 
-use crate::parser::{parse_declaration, parse_function_declaration};
-use crate::types::{ModuleBuilder, ResolverContext, StructFields, Symbol, SymbolRef, SymbolType};
+use crate::parser::parse_function_declaration;
+use crate::types::{Module, ModuleBuilder, ResolverContext, StructFields, Symbol, SymbolRef, SymbolType};
 
 type Result<T> = core::result::Result<T, Cow<'static, str>>;
 
@@ -20,6 +20,10 @@ pub struct ValueRef {
 }
 
 impl ValueRef {
+    pub fn kind(&self) -> &ValueKind {
+        &self.kind
+    }
+
     pub fn map(&self, id: usize) -> Self {
         Self {
             id,
@@ -111,6 +115,40 @@ impl ValueKind {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+pub struct MatchCaseOp {
+    pub pattern: MatchPatternOp,
+    pub body: (Box<[ValueRef]>, Box<Body>),
+    pub guard: Option<(Box<[ValueRef]>, Box<Body>)>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum MatchPatternOp {
+    Unit,
+    Wildcard,
+    Union(Vec<MatchPatternOp>),
+    Variable(usize),
+    NumberLiteral(i64),
+    StringLiteral(String),
+    IsTypeOrEnum(SymbolRefOrEnum),
+    TupleStruct { typ: SymbolRefOrEnum, params: Vec<MatchPatternOp>, exact: bool },
+    FieldStruct { typ: SymbolRefOrEnum, params: Vec<(String, MatchPatternOp)>, exact: bool },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum SymbolRefOrEnum {
+    Type(SymbolRef),
+    Enum(SymbolRef, String),
+}
+
+impl SymbolRefOrEnum {
+    pub fn owner_type(&self) -> &SymbolRef {
+        match self {
+            SymbolRefOrEnum::Type(t) | SymbolRefOrEnum::Enum(t, _) => &t,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
 enum Op {
     Label(ValueRef, String),
     ConstUnit,
@@ -123,6 +161,7 @@ enum Op {
     If(ValueRef, (Box<[ValueRef]>, Box<Body>), (Box<[ValueRef]>, Box<Body>)),
     Call(SymbolRef, Box<[ValueRef]>),
     Create(SymbolRef, Box<[(String, ValueRef)]>),
+    Match(ValueRef, Box<[MatchCaseOp]>),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -221,6 +260,43 @@ impl Body {
         Ok((params, Box::new(body)))
     }
 
+    pub fn derive_with_params(
+        &self,
+        params: &[ValueKind],
+        ops: impl FnOnce(&mut Body, &[ValueRef]) -> Result<(Box<[ValueRef]>, TerminatorOp)>,
+    ) -> Result<(Box<[ValueRef]>, Box<Body>)> {
+        let mut i = 0usize;
+        let param_refs = params
+            .iter()
+            .cloned()
+            .map(|kind| {
+                let id = i;
+                i += 1;
+                ValueRef {
+                    id,
+                    param: true,
+                    kind,
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut body = Self {
+            ops: Default::default(),
+            terminator_op: None,
+            params: Default::default(),
+            nb_params: 0,
+            next_ref_id: 0,
+            ret_kind: None,
+        };
+        let (params, terminal_op) = (ops)(&mut body, param_refs.as_slice())?;
+        body.terminator_op = Some(terminal_op);
+        body.params = param_refs
+            .iter()
+            .chain(params.iter())
+            .map(|r| r.kind.clone())
+            .collect();
+        Ok((params, Box::new(body)))
+    }
+
     pub fn yield_type(&self) -> ValueKind {
         self.ret_kind.clone().unwrap_or(ValueKind::Unit)
     }
@@ -315,14 +391,24 @@ impl Body {
         self.push(Op::If(cond, on_true, on_false), kind)
     }
 
-    pub fn call(&mut self, func: SymbolRef, args: impl Into<Box<[ValueRef]>>) -> Result<ValueRef> {
-        let Some(k) = func.typ().as_function_return_type() else { return Err("symbol isn't callable")?; };
-        self.push(Op::Call(func, args.into()), k)
+    pub fn call(&mut self, func: SymbolRef, ret_type: ValueKind, args: impl Into<Box<[ValueRef]>>) -> Result<ValueRef> {
+        self.push(Op::Call(func, args.into()), ret_type)
     }
 
     pub fn create(&mut self, struct_ref: SymbolRef, fields: impl Into<Box<[(String, ValueRef)]>>) -> Result<ValueRef> {
         let kind = ValueKind::Type(struct_ref.clone());
         self.push(Op::Create(struct_ref, fields.into()), kind)
+    }
+
+    pub fn match_(&mut self, expr: ValueRef, cases: impl Into<Box<[MatchCaseOp]>>) -> Result<ValueRef> {
+        let cases = cases.into();
+        let kind = cases
+            .iter()
+            .flat_map(|op| op.body.1.ret_kind.clone())
+            .next()
+            .map(Ok)
+            .unwrap_or_else(|| Err("at least 1 case is required in match expression"))?;
+        self.push(Op::Match(expr, cases), kind)
     }
 }
 
@@ -374,8 +460,22 @@ impl Value {
             }
         }
     }
+
+    pub fn kind(&self) -> ValueKind {
+        match self {
+            Value::Never => ValueKind::Never,
+            Value::Unit => ValueKind::Unit,
+            Value::Bool(_) => ValueKind::Bool,
+            Value::I64(_) => ValueKind::I64,
+            Value::I16(_) => ValueKind::I16,
+            Value::F64(_) => ValueKind::F64,
+            Value::Usize(_) => ValueKind::Usize,
+            Value::Composed(_, f) => ValueKind::Type(f.clone()),
+        }
+    }
 }
 
+#[derive(Debug)]
 struct Heap<'a>(&'a [Value], Vec<Value>);
 
 impl<'a> Heap<'a> {
@@ -397,8 +497,10 @@ fn eval(ctx: &impl ResolverContext, body: &Body, params: &[Value]) -> Result<Val
         Err(format!("invalid number of parameters: expected {} but got {}", body.params.len(), params.len()))?;
     }
     for (i, p) in params.iter().enumerate() {
-        if !p.is_assignable_to(&body.params[i]) {
-            Err("arguments not assignable to parameters types")?;
+        let expected = &body.params[i];
+        if !p.is_assignable_to(expected) {
+            let actual = p.kind();
+            Err(format!("arguments not assignable to parameters types: {actual:?} vs {expected:?}"))?;
         }
     }
     let mut heap = Heap(params, Vec::default());
@@ -496,6 +598,117 @@ fn eval(ctx: &impl ResolverContext, body: &Body, params: &[Value]) -> Result<Val
                 }
 
                 Value::Composed(Composed::Struct(values), sr.clone())
+            }
+            Op::Match(expr, cases) => {
+                fn eval_pattern(
+                    value: &Value,
+                    pattern: &MatchPatternOp,
+                    ctx: &impl ResolverContext,
+                    heap: &Heap,
+                    vars: &mut Vec<Value>,
+                ) -> Result<bool> {
+                    Ok(match pattern {
+                        MatchPatternOp::Unit => matches!(value.kind(), ValueKind::Unit),
+                        MatchPatternOp::Wildcard => true,
+                        MatchPatternOp::Union(p) => {
+                            for p in p {
+                                if eval_pattern(value, p, ctx, heap, vars)? {
+                                    return Ok(true);
+                                }
+                            }
+                            false
+                        }
+                        MatchPatternOp::Variable(id) => {
+                            if *id >= vars.len() {
+                                vars.resize(id + 1, Value::Never)
+                            }
+                            vars[*id] = value.clone();
+                            true
+                        }
+                        MatchPatternOp::NumberLiteral(n) => match value {
+                            Value::I64(actual) => *n == *actual,
+                            Value::I16(actual) => *n == *actual as i64,
+                            Value::F64(actual) => *n == *actual as i64,
+                            _ => false
+                        },
+                        MatchPatternOp::StringLiteral(_) => false,
+                        MatchPatternOp::IsTypeOrEnum(_) => false,
+                        MatchPatternOp::TupleStruct { .. } => false,
+                        MatchPatternOp::FieldStruct { typ, params, exact } => {
+                            let s = match typ {
+                                SymbolRefOrEnum::Type(s) => ctx.get_symbol(s)?,
+                                SymbolRefOrEnum::Enum(_, _) => return Ok(false)
+                            };
+                            let name = s.name();
+                            let s = match s {
+                                Symbol::Struct(s) => s.fields(),
+                                _ => return Ok(false)
+                            };
+                            let s = match s {
+                                StructFields::Named(s) => s,
+                                _ => return Ok(false)
+                            };
+                            let fields_by_name = s.iter()
+                                .enumerate()
+                                .map(|(i, f)| (f.name(), i))
+                                .collect::<BTreeMap<_, _>>();
+                            let s = match value {
+                                Value::Composed(s, _) => s,
+                                _ => return Ok(false)
+                            };
+                            let values = match s {
+                                Composed::Struct(s) => s
+                            };
+                            for (field, pattern) in params {
+                                let Some(id) = fields_by_name.get(field.as_str()) else { return Err(format!("Field {field} does not exist on struct {name}"))?; };
+                                let Some(value) = values.get(*id) else { return Err(format!("invalid ref in struct match pattern: {name}.{field}"))? };
+                                if !eval_pattern(value, pattern, ctx, heap, vars)? {
+                                    return Ok(false);
+                                }
+                            }
+                            true
+                            // match typ {
+                            //     SymbolRefOrEnum::Enum(e, v) => {
+                            //         let e = ctx.get_symbol(e)?;
+                            //         match e {
+                            //             Symbol::Enum(EnumDef { variants, .. }) => {
+                            //                 match value {
+                            //                     Value::Composed(e, _) => match e {
+                            //                         Composed::Struct(s) => s.
+                            //                     }
+                            //                     _ => false
+                            //                 }
+                            //             }
+                            //             _ => false
+                            //         }
+                            //     }
+                            //     _ => false,
+                            // }
+                        }
+                    })
+                }
+
+                let mut vars = vec![];
+                for x in cases.as_ref().iter() {
+                    let value = heap
+                        .get(expr)
+                        .ok_or_else(|| format!("invalid ref in match pattern"))?;
+                    if eval_pattern(&value, &x.pattern, ctx, &heap, &mut vars)? {
+                        let prettyvars = format!("{vars:?}");
+                        let prettyparams = format!("{:?}", x.body.0);
+                        let prettyheap = format!("{heap:?}");
+                        let params = vars
+                            .into_iter()
+                            .map(Ok)
+                            .chain(x.body.0
+                                .iter()
+                                .map(|v| heap.get(v).ok_or(format!("invalid ref in Match op: {v:?}, {prettyvars}, {prettyparams}, {prettyheap}").into())))
+                            .collect::<Result<Vec<_>>>()?;
+                        return eval(ctx, &x.body.1, params.as_slice());
+                    }
+                }
+
+                Value::Never
             }
         });
     }
@@ -617,12 +830,18 @@ fn it_runs_fn_with_composed_types() -> Result<()> {
     use crate::lexer::Token;
 
     //language=rust
-    let mut tokens = Token::parse_ascii(r#"
+    let tokens = Token::parse_ascii(r#"
 fn new_point(x: i64, y: i64) -> Point {
   Point {
     x,
     y: y + -1
   }
+}
+
+pub fn sum(x: i64, y: i64) -> i64 {
+  maybe_get_x(Some {
+    point: new_point(x, y)
+  })
 }
 
 // declaration order shouldn't matter
@@ -631,32 +850,71 @@ struct Point {
   x: i64,
   y: i64,
 }
+
+struct Some { point: Point }
+
+pub fn get_x(point: Point) -> i64 {
+  match point {
+    Point { x, y } => x + y
+  }
+}
+
+pub fn maybe_get_x(maybe_point: Some) -> i64 {
+  match maybe_point {
+    42 => get_x(Point { x: 1, y: 2 }),
+    Some { point: Point { x: 41, y: _ } } => -1,
+    Some { point: p } => get_x(p),
+  }
+}
 "#)?;
 
-    let module = ModuleBuilder::new("my_first_module")
-        .add_declaration(parse_declaration(&mut tokens)?)
-        .add_declaration(parse_declaration(&mut tokens)?)
-        .build()?;
+    let module = Module::parse_tokens("my_first_module", tokens)?;
 
     let Some(point_ref @ SymbolRef(_, SymbolType::Struct)) = module.get_ref_by_name("Point") else {
         return Err("'Point' is supposed to be declared as a struct")?;
     };
 
-    let Some(Symbol::Function(f)) = module.get_by_name("new_point") else {
-        return Err("'new_point' is supposed to be a function")?;
-    };
-
-    let body = f.body();
+    let body = get_function_body(&module, "new_point")?;
     assert_eq!(
         [
             eval(&module, body, &[Value::I64(0), Value::I64(1)])?,
         ], [
             Value::Composed(
                 Composed::Struct(vec![Value::I64(0), Value::I64(0)]),
-                point_ref,
+                point_ref.clone(),
             )
         ]
     );
 
+    let body = get_function_body(&module, "get_x")?;
+    assert_eq!(
+        [
+            eval(&module, body, &[Value::Composed(
+                Composed::Struct(vec![Value::I64(42), Value::I64(1337)]),
+                point_ref,
+            )])?,
+        ], [
+            Value::I64(1379)
+        ]
+    );
+
+    let body = get_function_body(&module, "sum")?;
+    assert_eq!(
+        [
+            eval(&module, body, &[Value::I64(42), Value::I64(1338)])?,
+        ], [
+            Value::I64(1379)
+        ]
+    );
+
     Ok(())
+}
+
+fn get_function_body<'a>(module: &'a Module, name: &str) -> Result<&'a Body> {
+    let Some(Symbol::Function(f)) = module.get_by_name(name) else {
+        return Err(format!("'{name}' is supposed to be a function"))?;
+    };
+
+    let body = f.body();
+    Ok(body)
 }

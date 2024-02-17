@@ -294,11 +294,11 @@ pub fn life(mut unused: u32) -> i64 {
             ret_type: Some(Type::I64),
             body: BlockExpression {
                 expressions: vec![],
-                remainder: Some(Expression::Add(Rc::new(
+                remainder: Some(Rc::new(Expression::Add(Rc::new(
                     Expression::Literal(40)
                 ), Rc::new(
                     Expression::Literal(2)
-                ))),
+                )))),
             },
         },
         root
