@@ -136,11 +136,16 @@ pub enum Expression<'a> {
 }
 
 #[derive(Eq, PartialEq, Debug)]
-pub struct FunctionDeclaration<'a> {
+pub struct FunctionPrototype<'a> {
     pub visibility: Visibility,
     pub name: Identifier<'a>,
     pub parameters: Vec<VariableSymbolDeclaration<'a>>,
     pub ret_type: Option<Type<'a>>,
+}
+
+#[derive(Eq, PartialEq, Debug)]
+pub struct FunctionDeclaration<'a> {
+    pub prototype: FunctionPrototype<'a>,
     pub body: BlockExpression<'a>,
 }
 
@@ -704,10 +709,12 @@ fn parse_function_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility)
     let body = parse_block_expression(tokens)?;
 
     Ok(FunctionDeclaration {
-        visibility,
-        name,
-        parameters,
-        ret_type,
+        prototype: FunctionPrototype {
+            visibility,
+            name,
+            parameters,
+            ret_type,
+        },
         body,
     })
 }
@@ -841,14 +848,16 @@ fn it_tokenize_function_declaration() -> Result<()> {
 
     assert_eq!(
         FunctionDeclaration {
-            visibility: Visibility::Pub,
-            name: Identifier("ten"),
-            parameters: vec![VariableSymbolDeclaration {
-                mutability: Mutability::Mutable,
-                name: Identifier("a"),
-                typ: Some(Type::U32),
-            }],
-            ret_type: None,
+            prototype: FunctionPrototype {
+                visibility: Visibility::Pub,
+                name: Identifier("ten"),
+                parameters: vec![VariableSymbolDeclaration {
+                    mutability: Mutability::Mutable,
+                    name: Identifier("a"),
+                    typ: Some(Type::U32),
+                }],
+                ret_type: None,
+            },
             body: BlockExpression {
                 expressions: vec![],
                 remainder: Some(Rc::new(Expression::Add(Rc::new(

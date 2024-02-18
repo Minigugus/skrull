@@ -555,7 +555,12 @@ fn eval(ctx: &impl ResolverContext, body: &Body, params: &[Value]) -> Result<Val
                     .map(|v| heap.get(v).ok_or("invalid ref in Call op".into()))
                     .collect::<Result<Vec<_>>>()?;
 
-                eval(ctx, f.body(), params.as_slice())?
+                if let Some(body) = f.body() {
+                    eval(ctx, body, params.as_slice())?
+                } else {
+                    let n = f.name();
+                    return Err(format!("function {n} doesn't have a body"))?
+                }
             }
             Op::Create(sr, fs) => {
                 let s = ctx.get_symbol(&sr).or(Err("struct symbol not found"))?;
@@ -781,8 +786,8 @@ pub fn life(mut a: i64) -> i64 {
         .build()?;
 
     let res = if let Some(Symbol::Function(f)) = module.get_by_name("life") {
-        // assert_eq!(f.body().ops, Vec::default());
-        eval(&module, f.body(), &[Value::I64(41)])?
+        let Some(body) = f.body() else { return Err("missing body")? };
+        eval(&module, body, &[Value::I64(41)])?
     } else {
         Value::Unit
     };
@@ -814,7 +819,7 @@ pub fn fib(n: i64) -> i64 {
         .build()?;
 
     if let Some(Symbol::Function(f)) = module.get_by_name("fib") {
-        let body = f.body();
+        let Some(body) = f.body() else { return Err("missing body")? };
         assert_eq!([
                        eval(&module, body, &[Value::I64(26)])?
                    ], [
@@ -915,6 +920,5 @@ fn get_function_body<'a>(module: &'a Module, name: &str) -> Result<&'a Body> {
         return Err(format!("'{name}' is supposed to be a function"))?;
     };
 
-    let body = f.body();
-    Ok(body)
+    f.body().ok_or("missing function body".into())
 }

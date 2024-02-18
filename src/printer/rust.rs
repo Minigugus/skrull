@@ -4,7 +4,7 @@ use alloc::rc::Rc;
 use alloc::string::String;
 use core::fmt::{Debug, Display, Formatter};
 
-use crate::parser::{BlockExpression, Expression, Fields, FunctionDeclaration, Mutability, parse_enum, parse_function_declaration, parse_struct, Struct, VariableSymbolDeclaration};
+use crate::parser::{BlockExpression, Expression, Fields, FunctionDeclaration, FunctionPrototype, Mutability, parse_enum, parse_function_declaration, parse_struct, Struct, VariableSymbolDeclaration};
 use crate::types::{EnumDef, EnumVariantFields, FunctionDef, Module, ModuleBuilder, PrimitiveType, Scope, StructDef, StructFields, Symbol, SymbolRef, TypeRef};
 
 type Result<T> = core::result::Result<T, Cow<'static, str>>;
@@ -154,7 +154,7 @@ impl ToRustPrintable for FunctionDef {
             Scope::Private => "",
             Scope::Public => "pub "
         }, self.name())?;
-        for (i, p) in self.params().enumerate() {
+        for (i, p) in self.params().iter().enumerate() {
             if i != 0 {
                 write!(f, ", ")?;
             }
@@ -284,14 +284,16 @@ pub fn life(mut unused: u32) -> i64 {
 
     assert_eq!(
         FunctionDeclaration {
-            visibility: Visibility::Pub,
-            name: Identifier("life"),
-            parameters: vec![VariableSymbolDeclaration {
-                mutability: Mutability::Mutable,
-                name: Identifier("unused"),
-                typ: Some(Type::U32),
-            }],
-            ret_type: Some(Type::I64),
+            prototype: FunctionPrototype {
+                visibility: Visibility::Pub,
+                name: Identifier("life"),
+                parameters: vec![VariableSymbolDeclaration {
+                    mutability: Mutability::Mutable,
+                    name: Identifier("unused"),
+                    typ: Some(Type::U32),
+                }],
+                ret_type: Some(Type::I64),
+            },
             body: BlockExpression {
                 expressions: vec![],
                 remainder: Some(Rc::new(Expression::Add(Rc::new(

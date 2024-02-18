@@ -2,7 +2,6 @@ use alloc::{format, vec};
 use alloc::borrow::{Cow, ToOwned};
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::collections::btree_map::Values;
 use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -12,7 +11,7 @@ use core::fmt::{Debug, Display, Formatter};
 
 use crate::bytecode::{Body, MatchCaseOp, MatchPatternOp, SymbolRefOrEnum, TerminatorOp, ValueKind, ValueRef};
 use crate::lexer::Token;
-use crate::parser::{BlockExpression, Declaration, Enum, Expression, Fields, FunctionDeclaration, Identifier, MatchExpression, MatchPattern, parse_declaration, Qualifier, Struct, Type, Visibility};
+use crate::parser::{BlockExpression, Declaration, Enum, Expression, Fields, FunctionDeclaration, FunctionPrototype, Identifier, MatchExpression, MatchPattern, parse_declaration, Qualifier, Struct, Type, Visibility};
 
 type Result<T> = core::result::Result<T, Cow<'static, str>>;
 
@@ -140,10 +139,15 @@ impl Symbol {
     }
 }
 
+pub struct PendingSymbol<'a> {
+    symbol: PendingProcessing<'a>,
+    body: Option<BlockExpression<'a>>,
+}
+
 pub enum PendingProcessing<'a> {
     Struct(Struct<'a>),
     Enum(Enum<'a>),
-    Function(FunctionDeclaration<'a>),
+    Function(FunctionPrototype<'a>),
 }
 
 impl<'a> PendingProcessing<'a> {
@@ -168,19 +172,21 @@ impl<'a> From<Enum<'a>> for PendingProcessing<'a> {
     }
 }
 
-impl<'a> From<FunctionDeclaration<'a>> for PendingProcessing<'a> {
-    fn from(value: FunctionDeclaration<'a>) -> Self {
+impl<'a> From<FunctionPrototype<'a>> for PendingProcessing<'a> {
+    fn from(value: FunctionPrototype<'a>) -> Self {
         Self::Function(value)
     }
 }
 
-impl<'a> From<Declaration<'a>> for PendingProcessing<'a> {
+impl<'a> From<Declaration<'a>> for PendingSymbol<'a> {
     fn from(value: Declaration<'a>) -> Self {
-        match value {
-            Declaration::Enum(v) => v.into(),
-            Declaration::Function(v) => v.into(),
-            Declaration::Struct(v) => v.into(),
-        }
+        let (symbol, body) = match value {
+            Declaration::Enum(v) => (v.into(), None),
+            Declaration::Function(v) => (v.prototype.into(), Some(v.body)),
+            Declaration::Struct(v) => (v.into(), None),
+        };
+
+        PendingSymbol { symbol, body }
     }
 }
 
@@ -287,27 +293,25 @@ impl<'a> SymbolLoader for Enum<'a> {
     }
 }
 
-impl<'a> SymbolLoader for FunctionDeclaration<'a> {
-    type Symbol = FunctionDef;
-
-    fn load(self, ctx: &impl LoaderContext) -> Result<Self::Symbol> {
-        let body = Body::new_with_dyn_params(
-            self.parameters
+impl<'a> BlockExpression<'a> {
+    pub fn to_fn_body(&self, parameters: &[Parameter], ctx: &impl LoaderContext) -> Result<Body> {
+        Ok(Body::new_with_dyn_params(
+            parameters
                 .iter()
-                .map(|p| Ok(type_ref_to_value_kind(&load_type(ctx, p.typ.unwrap_or(Type::Unit))?)))
-                .collect::<Result<Vec<_>>>()?
+                .map(Parameter::typ)
+                .map(type_ref_to_value_kind)
+                .collect::<Vec<_>>()
                 .as_ref(),
             |b, v| {
-                let params: BTreeMap<String, ValueRef> = self.parameters
+                let params: BTreeMap<String, ValueRef> = parameters
                     .iter()
                     .enumerate()
                     .map(|(i, p)| Ok((
-                        p.name.as_ref().to_string(),
-                        b.label(v[i].clone(), p.name.as_ref().to_string())?
+                        p.name().to_string(),
+                        b.label(v[i].clone(), p.name().to_string())?
                     )))
                     .collect::<Result<BTreeMap<_, _>>>()?;
 
-                let body1 = &self.body;
                 trait Scope {
                     fn read_variable(&self, name: &Identifier) -> Result<ValueRef>;
                 }
@@ -644,31 +648,31 @@ impl<'a> SymbolLoader for FunctionDeclaration<'a> {
                     })
                 }
 
-                visit_block_inner(b, ctx, &params, body1)
+                visit_block_inner(b, ctx, &params, self)
             },
-        )?;
-        let typ = self.ret_type.map(|t| load_type(ctx, t)).unwrap_or(Ok(TypeRef::Primitive(PrimitiveType::Unit)))?;
-        let body_type = body.yield_type();
-        // let ret_type = type_to_value_kind(self.ret_type.unwrap_or(Type::Unit));
-        let ret_type = type_ref_to_value_kind(&typ);
-        if !ret_type.is_assignable_from(&body_type) {
-            let body_type = body_type.to_string(ctx);
-            let ret_type = ret_type.to_string(ctx);
-            return Err(format!("cannot return type `{body_type}` when function is declared to return type `{ret_type}`"))?;
-        }
+        )?)
+    }
+}
+
+impl<'a> SymbolLoader for FunctionPrototype<'a> {
+    type Symbol = FunctionDef;
+
+    fn load(self, ctx: &impl LoaderContext) -> Result<Self::Symbol> {
         Ok(FunctionDef {
             scope: Scope::from(self.visibility),
             name: self.name.as_ref().to_string(),
             params: self.parameters
                 .into_iter()
-                .map(|p| Ok((p.name.as_ref().to_string(), Parameter {
+                .map(|p| Ok(Parameter {
                     mutable: p.mutability.into(),
                     name: p.name.as_ref().to_string(),
                     typ: load_type(ctx, p.typ.expect("parameters still requires type parameters"))?,
-                })))
-                .collect::<Result<BTreeMap<String, _>>>()?,
-            ret_type: typ,
-            body,
+                }))
+                .collect::<Result<Vec<_>>>()?,
+            ret_type: self.ret_type
+                .map(|t| load_type(ctx, t))
+                .unwrap_or(Ok(TypeRef::Primitive(PrimitiveType::Unit)))?,
+            body: None,
         })
     }
 }
@@ -752,9 +756,9 @@ impl Parameter {
 pub struct FunctionDef {
     scope: Scope,
     name: String,
-    params: BTreeMap<String, Parameter>,
+    params: Vec<Parameter>,
     ret_type: TypeRef,
-    body: Body,
+    body: Option<Body>,
 }
 
 impl FunctionDef {
@@ -766,16 +770,16 @@ impl FunctionDef {
         self.name.as_ref()
     }
 
-    pub fn params(&self) -> Values<'_, String, Parameter> {
-        self.params.values()
+    pub fn params(&self) -> &[Parameter] {
+        self.params.as_slice()
     }
 
     pub fn ret_type(&self) -> &TypeRef {
         &self.ret_type
     }
 
-    pub fn body(&self) -> &Body {
-        &self.body
+    pub fn body(&self) -> Option<&Body> {
+        self.body.as_ref()
     }
 }
 
@@ -973,6 +977,7 @@ impl Module {
 pub struct ModuleBuilder<'a> {
     module: Module,
     loading: Vec<PendingProcessing<'a>>,
+    bodies: Vec<(u32, BlockExpression<'a>)>,
 }
 
 impl ModuleBuilder<'static> {
@@ -984,23 +989,29 @@ impl ModuleBuilder<'static> {
                 by_name: Default::default(),
             },
             loading: Default::default(),
+            bodies: Default::default(),
         }
     }
 }
 
 impl<'a> ModuleBuilder<'a> {
-    fn allocate(&mut self, pending: PendingProcessing<'a>) {
+    fn allocate(&mut self, pending: PendingProcessing<'a>) -> u32 {
         let name = pending.meta();
         let id = self.loading.len() as u32;
         self.loading.push(pending);
         if let Some((name, typ)) = name {
             self.module.by_name.insert(name, (id, typ));
         }
+        id
     }
 
-    pub fn add_declaration<'b: 'a>(mut self, symbol: impl Into<PendingProcessing<'a>>) -> ModuleBuilder<'b>
+    pub fn add_declaration<'b: 'a>(mut self, symbol: impl Into<PendingSymbol<'a>>) -> ModuleBuilder<'b>
         where 'a: 'b {
-        self.allocate(symbol.into());
+        let PendingSymbol { symbol, body } = symbol.into();
+        let id = self.allocate(symbol);
+        if let Some(body) = body {
+            self.bodies.push((id, body));
+        }
         self
     }
 
@@ -1018,14 +1029,19 @@ impl<'a> ModuleBuilder<'a> {
 
     pub fn add_function<'b: 'a>(mut self, symbol: FunctionDeclaration<'b>) -> ModuleBuilder<'b>
         where 'a: 'b {
-        self.allocate(PendingProcessing::Function(symbol));
-        self
+        self.add_declaration(Declaration::Function(symbol))
     }
 
     pub fn build(mut self) -> Result<Module> {
         for processing in self.loading {
             let symbol = processing.load(&self.module)?;
             self.module.symbols.push(symbol)
+        }
+        for (id, body) in self.bodies {
+            let Symbol::Function(ref f) = self.module.symbols[id as usize] else { return Err("only function can have bodies!")?; };
+            let body = body.to_fn_body(f.params(), &self.module)?;
+            let Symbol::Function(ref mut f) = self.module.symbols[id as usize] else { return Err("only function can have bodies!")?; };
+            f.body = Some(body)
         }
         Ok(self.module)
     }
