@@ -11,6 +11,14 @@ use crate::types::{EnumDef, EnumVariantFields, FunctionDef, Module, PrimitiveTyp
 
 type JavaSymbolRef = (usize, Rc<String>);
 
+trait ToJavaResolver {
+    fn convert_refs(&self, r: &SymbolRef) -> JavaSymbolRef;
+
+    fn convert_types(&self, typ: &TypeRef) -> JavaType {
+        JavaType::from_type_ref(self, typ)
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 enum JavaVisibility {
     Public,
@@ -39,27 +47,45 @@ impl Display for JavaVisibility {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum JavaType {
+    Void,
     Byte,
     Short,
     Int,
     Long,
     Float,
     Double,
-    Record(JavaSymbolRef),
+    Class(JavaSymbolRef),
 }
 
 impl Display for JavaType {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
+            JavaType::Void => write!(f, "void"),
             JavaType::Byte => write!(f, "byte"),
             JavaType::Short => write!(f, "short"),
             JavaType::Int => write!(f, "int"),
             JavaType::Long => write!(f, "long"),
             JavaType::Float => write!(f, "float"),
             JavaType::Double => write!(f, "double"),
-            JavaType::Record((_, fqdn)) => write!(f, "{fqdn}"),
+            JavaType::Class((_, fqdn)) => write!(f, "{fqdn}"),
+        }
+    }
+}
+
+impl JavaType {
+    pub fn from_type_ref(ctx: &(impl ToJavaResolver + ?Sized), value: &TypeRef) -> Self {
+        match value {
+            TypeRef::Primitive(p) => match p {
+                PrimitiveType::I16 => JavaType::Short,
+                PrimitiveType::U32 => JavaType::Long,
+                PrimitiveType::I64 => JavaType::Long,
+                PrimitiveType::F64 => JavaType::Double,
+                PrimitiveType::Unit => JavaType::Void,
+                PrimitiveType::Usize => JavaType::Int,
+            }
+            TypeRef::Ref(r) => JavaType::Class(ctx.convert_refs(r))
         }
     }
 }
@@ -88,14 +114,19 @@ struct JavaRecord {
     fields: Vec<JavaField>,
 }
 
-impl Display for JavaRecord {
+struct WithMethods<'a, T>(&'a T, &'a [JavaFunction]);
+
+impl<'a> Display for WithMethods<'a, JavaRecord> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        let Self {
-            visibility,
-            name,
-            implements,
-            fields
-        } = self;
+        let Self(
+            JavaRecord {
+                visibility,
+                name,
+                implements,
+                fields
+            },
+            methods
+        ) = self;
         write!(f, "{visibility}record {name}(")?;
         let mut fields = fields.iter();
         if let Some(field) = fields.next() {
@@ -111,7 +142,16 @@ impl Display for JavaRecord {
             let implements = &implements.1;
             write!(f, " implements {implements}")?;
         }
-        write!(f, " {{ }}")
+        if methods.is_empty() {
+            write!(f, " {{ }}")?;
+        } else {
+            write!(f, " {{\n\n")?;
+            for fun in *methods {
+                write!(f, "{fun}")?;
+            }
+            write!(f, "\n}}")?;
+        };
+        Ok(())
     }
 }
 
@@ -122,19 +162,65 @@ struct JavaSealedInterface {
     permitted: Vec<JavaRecord>,
 }
 
-impl Display for JavaSealedInterface {
+impl<'a> Display for WithMethods<'a, JavaSealedInterface> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        let Self(
+            JavaSealedInterface {
+                visibility,
+                name,
+                permitted
+            },
+            methods
+        ) = self;
+        let no_methods = [];
+        write!(f, "{visibility}sealed interface {name} {{\n")?;
+        let mut permitted = permitted.iter();
+        while let Some(variant) = permitted.next() {
+            write!(f, "\n{}", WithMethods(variant, &no_methods))?;
+        }
+        write!(f, "\n\n}}\n")?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct JavaFunction {
+    visibility: JavaVisibility,
+    name: String,
+    parameters: Vec<JavaFunctionParameter>,
+    ret_type: JavaType,
+    body: (), // TODO: methods body
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct JavaFunctionParameter {
+    name: String,
+    fqdn: JavaType,
+}
+
+impl Display for JavaFunction {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         let Self {
             visibility,
             name,
-            permitted
+            parameters,
+            ret_type,
+            body // TODO print methods body
         } = self;
-        write!(f, "{visibility}sealed interface {name} {{\n")?;
-        let mut permitted = permitted.iter();
-        while let Some(variant) = permitted.next() {
-            write!(f, "\n{variant}")?;
+        write!(f, "  {visibility}static {ret_type} {name}(")?;
+        let mut parameters = parameters.iter();
+        let mut is_first = true;
+        while let Some(JavaFunctionParameter { name, fqdn }) = parameters.next() {
+            if is_first {
+                is_first = false;
+            } else {
+                write!(f, ", ")?;
+            }
+            write!(f, "{fqdn} {name}")?;
         }
-        write!(f, "\n\n}}\n")?;
+        write!(f, ") {{\n")?;
+        write!(f, "    return null; // TODO: functions body\n")?;
+        write!(f, "  }}\n")?;
         Ok(())
     }
 }
@@ -145,11 +231,12 @@ enum JavaSymbolKind {
     SealedInterface(JavaSealedInterface),
 }
 
-impl Display for JavaSymbolKind {
+impl<'a> Display for WithMethods<'a, JavaSymbolKind> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        match self {
-            JavaSymbolKind::Record(r) => Display::fmt(r, f),
-            JavaSymbolKind::SealedInterface(si) => Display::fmt(si, f),
+        let Self(sym, methods) = self;
+        match sym {
+            JavaSymbolKind::Record(r) => Display::fmt(&WithMethods(r, methods), f),
+            JavaSymbolKind::SealedInterface(si) => Display::fmt(&WithMethods(si, methods), f),
         }
     }
 }
@@ -158,22 +245,23 @@ impl Display for JavaSymbolKind {
 struct JavaSymbol {
     pkg: String,
     kind: JavaSymbolKind,
+    methods: Vec<JavaFunction>,
 }
 
 impl Display for JavaSymbol {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         let Self {
             pkg,
-            kind
+            kind,
+            methods
         } = self;
-        write!(f, "package {pkg};\n\n{kind}")
+        write!(f, "package {pkg};\n\n{}", WithMethods(kind, methods.as_slice()))
     }
 }
 
 enum JavaPendingSymbol<'a> {
     Record(&'a StructDef),
     SealedInterface(&'a EnumDef),
-    Function(&'a FunctionDef),
 }
 
 impl<'a> From<&'a StructDef> for JavaPendingSymbol<'a> {
@@ -188,47 +276,32 @@ impl<'a> From<&'a EnumDef> for JavaPendingSymbol<'a> {
     }
 }
 
-impl<'a> From<&'a FunctionDef> for JavaPendingSymbol<'a> {
-    fn from(value: &'a FunctionDef) -> Self {
-        Self::Function(value)
-    }
-}
-
 struct JavaModuleBuilder<'a> {
     fqdn: String,
     pending_symbols: Vec<(Rc<String>, JavaPendingSymbol<'a>)>,
+    pending_functions: Vec<&'a FunctionDef>,
     by_ref: BTreeMap<SymbolRef, JavaSymbolRef>,
     by_fqdn: BTreeMap<Rc<String>, JavaSymbolRef>,
 }
 
+impl<'a> ToJavaResolver for JavaModuleBuilder<'a> {
+    fn convert_refs(&self, r: &SymbolRef) -> JavaSymbolRef {
+        self.by_ref
+            .get(r)
+            .cloned()
+            .expect("SymbolRef should exist")
+    }
+}
+
 impl<'a> TryFrom<&'a Module> for JavaModule {
     type Error = Cow<'static, str>;
-    // pub fn new(fqdn: String) -> Self {
-    //     Self {
-    //         fqdn,
-    //         pending_symbols: vec![],
-    //         by_ref: Default::default(),
-    //     }
-    // }
-    //
-    // pub fn add_symbol<'b: 'a>(mut self, sym: impl Into<JavaPendingSymbol<'a>>) -> Self {
-    //     self.pending_symbols.push(sym.into());
-    //     self
-    // }
-    //
-    // pub fn build(self) -> JavaModule {
-    //     let module = JavaModule {
-    //         symbols: vec![],
-    //     };
-    //     self.pending_symbols
-    //     module
-    // }
 
     fn try_from(src: &'a Module) -> Result<Self, Self::Error> {
         let root_pkg = src.name();
         let mut builder = JavaModuleBuilder {
             fqdn: format!("{}.{}", root_pkg, "Root"),
-            pending_symbols: vec![],
+            pending_symbols: Default::default(),
+            pending_functions: Default::default(),
             by_ref: Default::default(),
             by_fqdn: Default::default(),
         };
@@ -240,7 +313,10 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
             builder.pending_symbols.push((java_ref.1.clone(), match s {
                 Symbol::Struct(v) => v.into(),
                 Symbol::Enum(v) => v.into(),
-                Symbol::Function(v) => v.into()
+                Symbol::Function(v) => {
+                    builder.pending_functions.push(v);
+                    continue;
+                }
             }));
             builder.by_ref.insert(id, java_ref.clone());
             builder.by_fqdn.insert(java_ref.1.clone(), java_ref);
@@ -249,11 +325,12 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
             symbols: vec![],
             by_fqdn: Default::default(),
         };
-        for (fqdn, sym) in builder.pending_symbols {
+        for (fqdn, sym) in &builder.pending_symbols {
             let id = module.symbols.len();
             let sym = match sym {
                 JavaPendingSymbol::Record(s) => JavaSymbol {
                     pkg: root_pkg.to_string(),
+                    methods: Default::default(),
                     kind: JavaSymbolKind::Record(JavaRecord {
                         visibility: JavaVisibility::from_type_scope(s.scope()),
                         name: s.name().to_string(),
@@ -263,21 +340,9 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
                                 .iter()
                                 .filter_map(|f| Some(JavaField {
                                     name: f.name().to_string(),
-                                    typ: match f.r#type() {
-                                        TypeRef::Primitive(p) => match p {
-                                            PrimitiveType::I16 => JavaType::Short,
-                                            PrimitiveType::U32 => JavaType::Long,
-                                            PrimitiveType::I64 => JavaType::Long,
-                                            PrimitiveType::F64 => JavaType::Double,
-                                            PrimitiveType::Unit => return None, // skip field
-                                            PrimitiveType::Usize => JavaType::Int,
-                                        }
-                                        TypeRef::Ref(r) => JavaType::Record(
-                                            builder.by_ref
-                                                .get(r)
-                                                .cloned()
-                                                .expect("couldn't resolve type ref")
-                                        )
+                                    typ: match builder.convert_types(f.r#type()) {
+                                        JavaType::Void => return None,
+                                        t => t
                                     },
                                 }))
                                 .collect(),
@@ -285,21 +350,9 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
                                 .iter()
                                 .filter_map(|f| Some(JavaField {
                                     name: format!("_{}", f.offset()),
-                                    typ: match f.r#type() {
-                                        TypeRef::Primitive(p) => match p {
-                                            PrimitiveType::I16 => JavaType::Short,
-                                            PrimitiveType::U32 => JavaType::Long,
-                                            PrimitiveType::I64 => JavaType::Long,
-                                            PrimitiveType::F64 => JavaType::Double,
-                                            PrimitiveType::Unit => return None, // skip field
-                                            PrimitiveType::Usize => JavaType::Int,
-                                        }
-                                        TypeRef::Ref(r) => JavaType::Record(
-                                            builder.by_ref
-                                                .get(r)
-                                                .cloned()
-                                                .expect("couldn't resolve type ref")
-                                        )
+                                    typ: match builder.convert_types(f.r#type()) {
+                                        JavaType::Void => return None,
+                                        t => t
                                     },
                                 }))
                                 .collect(),
@@ -309,6 +362,7 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
                 },
                 JavaPendingSymbol::SealedInterface(e) => JavaSymbol {
                     pkg: root_pkg.to_string(),
+                    methods: Default::default(),
                     kind: JavaSymbolKind::SealedInterface(JavaSealedInterface {
                         visibility: JavaVisibility::from_type_scope(e.scope()),
                         name: e.name().to_string(),
@@ -326,21 +380,9 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
                                         .iter()
                                         .filter_map(|f| Some(JavaField {
                                             name: f.name().to_string(),
-                                            typ: match f.r#type() {
-                                                TypeRef::Primitive(p) => match p {
-                                                    PrimitiveType::I16 => JavaType::Short,
-                                                    PrimitiveType::U32 => JavaType::Long,
-                                                    PrimitiveType::I64 => JavaType::Long,
-                                                    PrimitiveType::F64 => JavaType::Double,
-                                                    PrimitiveType::Unit => return None, // skip field
-                                                    PrimitiveType::Usize => JavaType::Int,
-                                                }
-                                                TypeRef::Ref(r) => JavaType::Record(
-                                                    builder.by_ref
-                                                        .get(r)
-                                                        .cloned()
-                                                        .expect("couldn't resolve type ref")
-                                                )
+                                            typ: match builder.convert_types(f.r#type()) {
+                                                JavaType::Void => return None,
+                                                t => t
                                             },
                                         }))
                                         .collect(),
@@ -348,21 +390,9 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
                                         .iter()
                                         .filter_map(|f| Some(JavaField {
                                             name: format!("_{}", f.offset()),
-                                            typ: match f.r#type() {
-                                                TypeRef::Primitive(p) => match p {
-                                                    PrimitiveType::I16 => JavaType::Short,
-                                                    PrimitiveType::U32 => JavaType::Long,
-                                                    PrimitiveType::I64 => JavaType::Long,
-                                                    PrimitiveType::F64 => JavaType::Double,
-                                                    PrimitiveType::Unit => return None, // skip field
-                                                    PrimitiveType::Usize => JavaType::Int,
-                                                }
-                                                TypeRef::Ref(r) => JavaType::Record(
-                                                    builder.by_ref
-                                                        .get(r)
-                                                        .cloned()
-                                                        .expect("couldn't resolve type ref")
-                                                )
+                                            typ: match builder.convert_types(f.r#type()) {
+                                                JavaType::Void => return None,
+                                                t => t
                                             },
                                         }))
                                         .collect(),
@@ -371,11 +401,35 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
                             })
                             .collect(),
                     }),
-                },
-                JavaPendingSymbol::Function(f) => continue
+                }
             };
             module.symbols.push(sym);
             module.by_fqdn.insert(fqdn.to_string(), id);
+        }
+        for def in &builder.pending_functions {
+            let Some(body) = def.body() else { continue; };
+
+            let ret_type = builder.convert_types(def.ret_type());
+
+            let function = JavaFunction {
+                visibility: JavaVisibility::from_type_scope(def.scope()),
+                name: def.name().to_string(),
+                parameters: def.params()
+                    .iter()
+                    .map(|p| JavaFunctionParameter {
+                        name: p.name().to_string(),
+                        fqdn: builder.convert_types(p.typ()),
+                    }).collect(),
+                ret_type: ret_type.clone(),
+                body: (),
+            };
+
+            let JavaType::Class(sym) = ret_type else { continue; };
+            let Some(sym) = module.by_fqdn
+                .get(sym.1.as_str())
+                .cloned()
+                .and_then(|fqdn| module.symbols.get_mut(fqdn)) else { continue; };
+            sym.methods.push(function);
         }
         Ok(module)
     }
@@ -461,7 +515,13 @@ public record Size(
 record Point(
   short x,
   short y
-) { }"#.to_string())
+) {
+
+  static my_first_module.Point new_point(short x, short y) {
+    return null; // TODO: functions body
+  }
+
+}"#.to_string())
     );
 
     assert_eq!(
@@ -476,6 +536,7 @@ record Rectangle(
 
     assert_eq!(java.resolve("my_first_module.Size"), Some(&JavaSymbol {
         pkg: "my_first_module".to_string(),
+        methods: vec![],
         kind: JavaSymbolKind::Record(JavaRecord {
             visibility: JavaVisibility::Public,
             name: "Size".to_string(),
@@ -495,6 +556,24 @@ record Rectangle(
 
     assert_eq!(java.resolve("my_first_module.Point"), Some(&JavaSymbol {
         pkg: "my_first_module".to_string(),
+        methods: vec![
+            JavaFunction {
+                visibility: JavaVisibility::PackagePrivate,
+                name: "new_point".into(),
+                parameters: vec![
+                    JavaFunctionParameter {
+                        name: "x".into(),
+                        fqdn: JavaType::Short,
+                    },
+                    JavaFunctionParameter {
+                        name: "y".into(),
+                        fqdn: JavaType::Short,
+                    },
+                ],
+                ret_type: JavaType::Class((0, Rc::new("my_first_module.Point".into()))),
+                body: (),
+            }
+        ],
         kind: JavaSymbolKind::Record(JavaRecord {
             visibility: JavaVisibility::PackagePrivate,
             name: "Point".to_string(),
@@ -514,6 +593,7 @@ record Rectangle(
 
     assert_eq!(java.resolve("my_first_module.Rectangle"), Some(&JavaSymbol {
         pkg: "my_first_module".to_string(),
+        methods: vec![],
         kind: JavaSymbolKind::Record(JavaRecord {
             visibility: JavaVisibility::PackagePrivate,
             name: "Rectangle".to_string(),
@@ -521,11 +601,11 @@ record Rectangle(
             fields: vec![
                 JavaField {
                     name: "origin".to_string(),
-                    typ: JavaType::Record((0, Rc::from("my_first_module.Point".to_string()))),
+                    typ: JavaType::Class((0, Rc::from("my_first_module.Point".to_string()))),
                 },
                 JavaField {
                     name: "size".to_string(),
-                    typ: JavaType::Record((3, Rc::from("my_first_module.Size".to_string()))),
+                    typ: JavaType::Class((3, Rc::from("my_first_module.Size".to_string()))),
                 },
             ],
         }),
