@@ -117,6 +117,10 @@ impl Display for SymbolRef {
 }
 
 impl SymbolRef {
+    pub fn id(&self) -> usize {
+        self.0 as usize
+    }
+
     pub fn typ(&self) -> &SymbolType {
         &self.1
     }

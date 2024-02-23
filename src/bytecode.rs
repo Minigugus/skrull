@@ -13,18 +13,28 @@ use crate::types::{Module, ModuleBuilder, ResolverContext, StructFields, Symbol,
 type Result<T> = core::result::Result<T, Cow<'static, str>>;
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct ValueRef {
+pub struct AnyValueRef<T> {
     id: usize,
     param: bool,
-    kind: ValueKind,
+    kind: T,
 }
 
-impl ValueRef {
-    pub fn kind(&self) -> &ValueKind {
+pub type ValueRef = AnyValueRef<ValueKind>;
+
+impl<T> AnyValueRef<T> {
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    pub fn kind(&self) -> &T {
         &self.kind
     }
 
-    pub fn map(&self, id: usize) -> Self {
+    pub fn is_param(&self) -> bool {
+        self.param
+    }
+
+    pub fn map(&self, id: usize) -> Self where T: Clone {
         Self {
             id,
             param: true,
@@ -33,7 +43,7 @@ impl ValueRef {
     }
 }
 
-impl Debug for ValueRef {
+impl<T: Debug> Debug for AnyValueRef<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         let Self { id, kind, param } = self;
         let param = if *param { "P" } else { "" };
@@ -41,13 +51,13 @@ impl Debug for ValueRef {
     }
 }
 
-impl PartialOrd<Self> for ValueRef {
+impl<T: PartialEq<T>> PartialOrd<Self> for AnyValueRef<T> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.id.partial_cmp(&other.id)
     }
 }
 
-impl Ord for ValueRef {
+impl<T: Eq> Ord for AnyValueRef<T> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.id.cmp(&other.id)
     }
@@ -149,7 +159,7 @@ impl SymbolRefOrEnum {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum Op {
+pub enum Op {
     Label(ValueRef, String),
     ConstUnit,
     ConstI64(i64),
@@ -170,20 +180,31 @@ pub enum TerminatorOp {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct Body {
-    ops: Vec<Op>,
-    terminator_op: Option<TerminatorOp>,
-    params: Vec<ValueKind>,
-    nb_params: usize,
-    next_ref_id: usize,
-    ret_kind: Option<ValueKind>,
+pub struct AnyBody<T, U, V> {
+    pub ops: Vec<T>,
+    pub terminator_op: Option<U>,
+    pub params: Vec<V>,
+    pub next_ref_id: usize,
+    pub ret_kind: Option<V>,
 }
 
-impl Body {
+impl<T, U, V> Default for AnyBody<T, U, V> {
+    fn default() -> Self {
+        Self {
+            ops: vec![],
+            terminator_op: None,
+            params: vec![],
+            next_ref_id: 0,
+            ret_kind: None,
+        }
+    }
+}
+
+impl<T, U, V> AnyBody<T, U, V> {
     pub fn new_with_dyn_params(
-        params: &[ValueKind],
-        ops: impl FnOnce(&mut Body, &[ValueRef]) -> Result<TerminatorOp>,
-    ) -> Result<Self> {
+        params: &[V],
+        ops: impl FnOnce(&mut Self, &[AnyValueRef<V>]) -> Result<U>,
+    ) -> Result<Self> where V: Clone {
         let mut i = 0usize;
         let param_refs = params
             .iter()
@@ -191,7 +212,7 @@ impl Body {
             .map(|kind| {
                 let id = i;
                 i += 1;
-                ValueRef {
+                AnyValueRef {
                     id,
                     param: true,
                     kind,
@@ -202,7 +223,6 @@ impl Body {
             ops: Default::default(),
             terminator_op: None,
             params: param_refs.iter().map(|v| v.kind.clone()).collect(),
-            nb_params: 0,
             next_ref_id: 0,
             ret_kind: None,
         };
@@ -210,13 +230,12 @@ impl Body {
         body.terminator_op = Some(terminator_op);
         Ok(body)
     }
-
-    fn new_with_params<const N: usize>(params: &[ValueKind; N]) -> (Self, [ValueRef; N]) {
+    fn new_with_params<const N: usize>(params: &[V; N]) -> (Self, [AnyValueRef<V>; N]) where V: Clone {
         let mut i = 0usize;
         let param_refs = params.clone().map(|kind| {
             let id = i;
             i += 1;
-            ValueRef {
+            AnyValueRef {
                 id,
                 param: true,
                 kind,
@@ -226,16 +245,15 @@ impl Body {
             ops: Default::default(),
             terminator_op: None,
             params: param_refs.iter().map(|v| v.kind.clone()).collect(),
-            nb_params: 0,
             next_ref_id: 0,
             ret_kind: None,
         }, param_refs)
     }
 
     fn new_with_params_and_ops<const N: usize>(
-        params: &[ValueKind; N],
-        ops: impl FnOnce(&mut Body, [ValueRef; N]) -> Result<TerminatorOp>,
-    ) -> Result<Self> {
+        params: &[V; N],
+        ops: impl FnOnce(&mut Self, [AnyValueRef<V>; N]) -> Result<U>,
+    ) -> Result<Self> where V: Clone {
         let (mut body, params) = Self::new_with_params(params);
         let terminator_op = (ops)(&mut body, params)?;
         body.terminator_op = Some(terminator_op);
@@ -244,13 +262,12 @@ impl Body {
 
     pub fn derive(
         &self,
-        ops: impl FnOnce(&mut Body) -> Result<(Box<[ValueRef]>, TerminatorOp)>,
-    ) -> Result<(Box<[ValueRef]>, Box<Body>)> {
+        ops: impl FnOnce(&mut Self) -> Result<(Box<[AnyValueRef<V>]>, U)>,
+    ) -> Result<(Box<[AnyValueRef<V>]>, Box<Self>)> where V: Clone {
         let mut body = Self {
             ops: Default::default(),
             terminator_op: None,
             params: Default::default(),
-            nb_params: 0,
             next_ref_id: 0,
             ret_kind: None,
         };
@@ -262,9 +279,9 @@ impl Body {
 
     pub fn derive_with_params(
         &self,
-        params: &[ValueKind],
-        ops: impl FnOnce(&mut Body, &[ValueRef]) -> Result<(Box<[ValueRef]>, TerminatorOp)>,
-    ) -> Result<(Box<[ValueRef]>, Box<Body>)> {
+        params: &[V],
+        ops: impl FnOnce(&mut Self, &[AnyValueRef<V>]) -> Result<(Box<[AnyValueRef<V>]>, U)>,
+    ) -> Result<(Box<[AnyValueRef<V>]>, Box<Self>)> where V: Clone {
         let mut i = 0usize;
         let param_refs = params
             .iter()
@@ -272,7 +289,7 @@ impl Body {
             .map(|kind| {
                 let id = i;
                 i += 1;
-                ValueRef {
+                AnyValueRef {
                     id,
                     param: true,
                     kind,
@@ -283,7 +300,6 @@ impl Body {
             ops: Default::default(),
             terminator_op: None,
             params: Default::default(),
-            nb_params: 0,
             next_ref_id: 0,
             ret_kind: None,
         };
@@ -297,21 +313,25 @@ impl Body {
         Ok((params, Box::new(body)))
     }
 
-    pub fn yield_type(&self) -> ValueKind {
-        self.ret_kind.clone().unwrap_or(ValueKind::Unit)
+    pub fn yield_type(&self) -> Option<&V> {
+        self.ret_kind.as_ref()
     }
 
-    fn push(&mut self, op: Op, kind: ValueKind) -> Result<ValueRef> {
+    pub(crate) fn push(&mut self, op: T, kind: V) -> Result<AnyValueRef<V>> where V: Clone {
         self.ops.push(op);
         let id = self.next_ref_id;
         self.next_ref_id += 1;
-        Ok(ValueRef {
+        Ok(AnyValueRef {
             id,
             param: false,
             kind,
         })
     }
+}
 
+pub type Body = AnyBody<Op, TerminatorOp, ValueKind>;
+
+impl Body {
     pub fn label(&mut self, value: ValueRef, label: impl Into<String>) -> Result<ValueRef> {
         let kind = value.kind.clone();
         self.push(Op::Label(value, label.into()), kind)
