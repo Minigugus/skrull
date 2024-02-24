@@ -1,5 +1,6 @@
 use alloc::{format, vec};
 use alloc::borrow::Cow;
+use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 
@@ -137,6 +138,7 @@ pub enum Expression<'a> {
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct FunctionPrototype<'a> {
+    pub doc: Box<[&'a str]>,
     pub visibility: Visibility,
     pub name: Identifier<'a>,
     pub parameters: Vec<VariableSymbolDeclaration<'a>>,
@@ -196,6 +198,7 @@ impl<'a> AsRef<str> for Identifier<'a> {
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct NamedField<'a> {
+    pub doc: Box<[&'a str]>,
     pub visibility: Visibility,
     pub name: Identifier<'a>,
     pub typ: Type<'a>,
@@ -216,12 +219,14 @@ pub enum Fields<'a> {
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct EnumVariant<'a> {
+    pub doc: Box<[&'a str]>,
     pub name: Identifier<'a>,
     pub fields: Fields<'a>,
 }
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct StructOrEnum<'a, T> {
+    pub doc: Box<[&'a str]>,
     pub visibility: Visibility,
     pub name: Identifier<'a>,
     pub body: T,
@@ -278,6 +283,16 @@ fn parse_optional_group_with_dotdot<'a, T, F: Fn(&mut Vec<Token<'a>>) -> Result<
     }
 
     Ok(Some((items, dotdot_at_end)))
+}
+
+fn parse_doc_comments<'a>(tokens: &mut Vec<Token<'a>>) -> Box<[&'a str]> {
+    let mut result = vec![];
+    while let Some(DocComment(content)) = peek_token(tokens) {
+        let content = *content;
+        tokens.remove(0);
+        result.push(content);
+    }
+    result.into_boxed_slice()
 }
 
 fn parse_visibility(tokens: &mut Vec<Token>) -> Visibility {
@@ -373,17 +388,19 @@ fn parse_type<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Option<Type<'a>>> {
 fn parse_named_field<'a>(tokens: &mut Vec<Token<'a>>) -> Result<NamedField<'a>> {
     // let visibility = parse_visibility(tokens);
     // let name = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected a field name")?;
+    let doc = parse_doc_comments(tokens);
     let (name, visibility) = parse_identifier_and_keywords(tokens, Colon)
         .when_parsing("the named field identifier and visibility")?
         .unwrap_or_expected_at(tokens, "expected the `pub` keyword or an field identifier")?;
-    let r#type = parse_type(tokens)
+    let typ = parse_type(tokens)
         .when_parsing("the named field type")?
         .unwrap_or_expected_at(tokens, "expected a field type")?;
 
     Ok(NamedField {
+        doc,
         visibility,
         name,
-        typ: r#type,
+        typ,
     })
 }
 
@@ -411,7 +428,7 @@ pub fn parse_fields<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Fields<'a>> {
     })
 }
 
-fn parse_struct_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility) -> Result<Struct<'a>> {
+fn parse_struct_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility, doc: Box<[&'a str]>) -> Result<Struct<'a>> {
     eat_token(tokens, Symbol("struct")).unwrap_or_expected_at(tokens, "expected the struct keyword")?;
     let name = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected a struct name")?;
     let body = parse_fields(tokens)?;
@@ -420,6 +437,7 @@ fn parse_struct_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility) -
     }
 
     Ok(StructOrEnum {
+        doc,
         visibility,
         name,
         body,
@@ -427,30 +445,34 @@ fn parse_struct_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility) -
 }
 
 pub fn parse_struct<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Struct<'a>> {
+    let doc = parse_doc_comments(tokens);
     let visibility = parse_visibility(tokens);
 
-    parse_struct_inner(tokens, visibility)
+    parse_struct_inner(tokens, visibility, doc)
 }
 
 pub fn parse_enum_variant<'a>(tokens: &mut Vec<Token<'a>>) -> Result<EnumVariant<'a>> {
     // let visibility = parse_visibility(tokens);
     // eat_token(tokens, Symbol("enum")).unwrap_or_expected_at(tokens, "expected the enum keyword")?;
+    let doc = parse_doc_comments(tokens);
     let name = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected a enum name")?;
     let fields = parse_fields(tokens)?;
 
     Ok(EnumVariant {
+        doc,
         name,
         fields,
     })
 }
 
-fn parse_enum_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility) -> Result<Enum<'a>> {
+fn parse_enum_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility, doc: Box<[&'a str]>) -> Result<Enum<'a>> {
     eat_token(tokens, Symbol("enum")).unwrap_or_expected_at(tokens, "expected the enum keyword")?;
     let name = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected a enum name")?;
     let body = parse_group(tokens, parse_enum_variant, BraceOpen, BraceClose)
         .when_parsing("the enum body")?;
 
     Ok(StructOrEnum {
+        doc,
         visibility,
         name,
         body,
@@ -458,9 +480,10 @@ fn parse_enum_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility) -> 
 }
 
 pub fn parse_enum<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Enum<'a>> {
+    let doc = parse_doc_comments(tokens);
     let visibility = parse_visibility(tokens);
 
-    parse_enum_inner(tokens, visibility)
+    parse_enum_inner(tokens, visibility, doc)
 }
 
 pub fn parse_field_init<'a>(tokens: &mut Vec<Token<'a>>) -> Result<(Identifier<'a>, Expression<'a>)> {
@@ -700,7 +723,7 @@ fn parse_return_type<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Option<Type<'a>>
     })
 }
 
-fn parse_function_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility) -> Result<FunctionDeclaration<'a>> {
+fn parse_function_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility, doc: Box<[&'a str]>) -> Result<FunctionDeclaration<'a>> {
     eat_token(tokens, Symbol("fn")).unwrap_or_expected_at(tokens, "expected the `fn` keyword")?;
     let name = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected a function name")?;
     let parameters = parse_group(tokens, parse_parameter, ParenthesisOpen, ParenthesisClose)
@@ -710,6 +733,7 @@ fn parse_function_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility)
 
     Ok(FunctionDeclaration {
         prototype: FunctionPrototype {
+            doc,
             visibility,
             name,
             parameters,
@@ -720,9 +744,10 @@ fn parse_function_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility)
 }
 
 pub fn parse_function_declaration<'a>(tokens: &mut Vec<Token<'a>>) -> Result<FunctionDeclaration<'a>> {
+    let doc = parse_doc_comments(tokens);
     let visibility = parse_visibility(tokens);
 
-    parse_function_inner(tokens, visibility)
+    parse_function_inner(tokens, visibility, doc)
 }
 
 pub enum Declaration<'a> {
@@ -732,12 +757,13 @@ pub enum Declaration<'a> {
 }
 
 pub fn parse_declaration<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Declaration<'a>> {
+    let doc = parse_doc_comments(tokens);
     let visibility = parse_visibility(tokens);
 
     Ok(match peek_token(tokens) {
-        Some(Symbol("enum")) => Declaration::Enum(parse_enum_inner(tokens, visibility)?),
-        Some(Symbol("fn")) => Declaration::Function(parse_function_inner(tokens, visibility)?),
-        Some(Symbol("struct")) => Declaration::Struct(parse_struct_inner(tokens, visibility)?),
+        Some(Symbol("enum")) => Declaration::Enum(parse_enum_inner(tokens, visibility, doc)?),
+        Some(Symbol("fn")) => Declaration::Function(parse_function_inner(tokens, visibility, doc)?),
+        Some(Symbol("struct")) => Declaration::Struct(parse_struct_inner(tokens, visibility, doc)?),
         kind => Err(format!("expected a struct, enum or function declaration, got {kind:?}"))?
     })
 }
@@ -747,6 +773,9 @@ pub fn parse_declaration<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Declaration<
 fn it_tokenize_struct_with_keywords_as_identifiers() -> Result<()> {
     let mut tokens = Token::parse_ascii(r#"pub struct Token {
   struct: TokenKind,
+
+  /// Unlike Rust, Skrull supports keywords as identifiers natively ! :D
+  /// (not everywhere actually but it's still cool ^^')
   pub pub: usize,
 }"#)?;
 
@@ -754,15 +783,21 @@ fn it_tokenize_struct_with_keywords_as_identifiers() -> Result<()> {
 
     assert_eq!(
         Struct {
+            doc: Box::new([]),
             visibility: Visibility::Pub,
             name: Identifier("Token"),
             body: Fields::NamedFields(vec![
                 NamedField {
+                    doc: Box::new([]),
                     visibility: Visibility::Default,
                     name: Identifier("struct"),
                     typ: Type::Identifier(Identifier("TokenKind")),
                 },
                 NamedField {
+                    doc: Box::new([
+                        " Unlike Rust, Skrull supports keywords as identifiers natively ! :D",
+                        " (not everywhere actually but it's still cool ^^')"
+                    ]),
                     visibility: Visibility::Pub,
                     name: Identifier("pub"),
                     typ: Type::Usize,
@@ -777,8 +812,14 @@ fn it_tokenize_struct_with_keywords_as_identifiers() -> Result<()> {
 
 #[test]
 fn it_tokenize_enum() -> Result<()> {
-    let mut tokens = /*language=rust*/Token::parse_ascii(r#"pub enum TokenKind {
+    let mut tokens = /*language=rust*/Token::parse_ascii(r#"
+/// The kind of token that can be encountered
+///     in this language
+// usually not `Unexpected`
+pub enum TokenKind {
     Equal,
+
+    /// Should always generate an error when present
     Unexpected { character: char }
 }"#)?;
 
@@ -786,17 +827,26 @@ fn it_tokenize_enum() -> Result<()> {
 
     assert_eq!(
         Enum {
+            doc: Box::new([
+                " The kind of token that can be encountered",
+                "     in this language"
+            ]),
             visibility: Visibility::Pub,
             name: Identifier("TokenKind"),
             body: vec![
                 EnumVariant {
+                    doc: Box::new([]),
                     name: Identifier("Equal"),
                     fields: Fields::Unit,
                 },
                 EnumVariant {
+                    doc: Box::new([
+                        " Should always generate an error when present"
+                    ]),
                     name: Identifier("Unexpected"),
                     fields: Fields::NamedFields(vec![
                         NamedField {
+                            doc: Box::new([]),
                             visibility: Visibility::Default,
                             name: Identifier("character"),
                             typ: Type::Identifier(Identifier("char")),
@@ -849,6 +899,7 @@ fn it_tokenize_function_declaration() -> Result<()> {
     assert_eq!(
         FunctionDeclaration {
             prototype: FunctionPrototype {
+                doc: Box::new([]),
                 visibility: Visibility::Pub,
                 name: Identifier("ten"),
                 parameters: vec![VariableSymbolDeclaration {

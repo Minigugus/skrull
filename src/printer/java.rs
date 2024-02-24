@@ -2,6 +2,7 @@
 
 use alloc::{format, vec};
 use alloc::borrow::Cow;
+use alloc::boxed::Box;
 use alloc::string::String;
 use core::fmt::{Debug, Display, Formatter};
 
@@ -702,15 +703,18 @@ enum TokenKind {
 
     assert_eq!(
         Struct {
+            doc: Box::new([]),
             visibility: Visibility::Pub,
             name: Identifier("Token"),
             body: Fields::NamedFields(vec![
                 NamedField {
+                    doc: Box::new([]),
                     visibility: Visibility::Default,
                     name: Identifier("struct"),
                     typ: Type::Identifier(Identifier("TokenKind")),
                 },
                 NamedField {
+                    doc: Box::new([]),
                     visibility: Visibility::Pub,
                     name: Identifier("pub"),
                     typ: Type::Usize,
