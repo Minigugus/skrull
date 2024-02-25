@@ -288,8 +288,8 @@ pub fn life(mut unused: u32) -> i64 {
 
     assert_eq!(
         FunctionDeclaration {
-            doc: Box::new([]),
             prototype: FunctionPrototype {
+                doc: Box::new([]),
                 visibility: Visibility::Pub,
                 name: Identifier("life"),
                 parameters: vec![VariableSymbolDeclaration {

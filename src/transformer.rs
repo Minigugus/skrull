@@ -6,9 +6,9 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::{Display, Formatter};
 
-use crate::bytecode::{AnyBody, AnyValueRef, Body, Op, TerminatorOp};
+use crate::bytecode::{AnyBody, AnyValueRef, Body, Op, TerminatorOp, ValueKind};
 use crate::lexer::Token;
-use crate::types::{EnumDef, EnumVariantFields, FunctionDef, Module, PrimitiveType, Scope, StructDef, StructFields, Symbol, SymbolRef, TypeRef};
+use crate::types::{EnumDef, EnumVariantFields, FunctionDef, Module, PrimitiveType, Scope, StructDef, StructFields, Symbol, SymbolRef, TypeRef, value_kind_to_type_ref};
 
 type JavaSymbolRef = (usize, Rc<String>);
 
@@ -18,6 +18,14 @@ trait ToJavaResolver {
 
     fn convert_types(&self, typ: &TypeRef) -> JavaType {
         JavaType::from_type_ref(self, typ)
+    }
+
+    fn convert_kind(&self, typ: &ValueKind) -> JavaValueKind {
+        let kind = value_kind_to_type_ref(typ);
+        match kind {
+            Some(typ) => Self::convert_types(self, &typ).into(),
+            None => JavaValueKind::Never
+        }
     }
 }
 
@@ -92,8 +100,61 @@ impl JavaType {
     }
 }
 
+fn print_as_java_doc(f: &mut Formatter, indent: &str, doc: &Option<Rc<str>>, params: Option<&[JavaField]>) -> Result<(), core::fmt::Error> {
+    let mut created = false;
+    if let Some(doc) = doc {
+        for line in doc.lines() {
+            if !created {
+                created = true;
+                f.write_str(indent)?;
+                f.write_str("/**\n")?;
+            }
+            f.write_str(indent)?;
+            if line.trim().is_empty() {
+                f.write_str(" * <p>\n")?;
+            } else {
+                write!(f, " *{line}\n")?;
+            }
+        }
+    }
+
+    if let Some(params) = params {
+        let mut first = true;
+        for param in params {
+            let Some(doc) = &param.doc else { continue; };
+            for line in doc.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                } else {
+                    if !created {
+                        created = true;
+                        first = false;
+                        f.write_str(indent)?;
+                        f.write_str("/**\n")?;
+                    } else if first {
+                        first = false;
+                        f.write_str(indent)?;
+                        f.write_str(" *\n")?;
+                    }
+                    f.write_str(indent)?;
+                    let line = if line.starts_with(' ') { &line[1..] } else { line };
+                    write!(f, " * @param {} {line}\n", param.name)?;
+                }
+            }
+        }
+    }
+
+    if created {
+        f.write_str(indent)?;
+        f.write_str(" */\n")?;
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct JavaField {
+    doc: Option<Rc<str>>,
     name: String,
     typ: JavaType,
 }
@@ -102,14 +163,16 @@ impl Display for JavaField {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         let Self {
             typ,
-            name
+            name,
+            ..
         } = self;
-        write!(f, "{typ} {name}")
+        write!(f, "  {typ} {name}")
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 struct JavaRecord {
+    doc: Option<Rc<str>>,
     visibility: JavaVisibility,
     name: String,
     implements: Option<JavaSymbolRef>,
@@ -122,6 +185,7 @@ impl<'a> Display for WithMethods<'a, JavaRecord> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         let Self(
             JavaRecord {
+                doc,
                 visibility,
                 name,
                 implements,
@@ -129,12 +193,13 @@ impl<'a> Display for WithMethods<'a, JavaRecord> {
             },
             methods
         ) = self;
+        print_as_java_doc(f, "", doc, Some(fields.as_slice()))?;
         write!(f, "{visibility}record {name}(")?;
         let mut fields = fields.iter();
         if let Some(field) = fields.next() {
-            write!(f, "\n  {field}")?;
+            write!(f, "\n{field}")?;
             while let Some(field) = fields.next() {
-                write!(f, ",\n  {field}")?;
+                write!(f, ",\n{field}")?;
             }
             write!(f, "\n)")?;
         } else {
@@ -159,6 +224,7 @@ impl<'a> Display for WithMethods<'a, JavaRecord> {
 
 #[derive(Debug, Eq, PartialEq)]
 struct JavaSealedInterface {
+    doc: Option<Rc<str>>,
     visibility: JavaVisibility,
     name: String,
     permitted: Vec<JavaRecord>,
@@ -168,12 +234,14 @@ impl<'a> Display for WithMethods<'a, JavaSealedInterface> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         let Self(
             JavaSealedInterface {
+                doc,
                 visibility,
                 name,
                 permitted
             },
             methods
         ) = self;
+        print_as_java_doc(f, "", doc, None)?;
         write!(f, "{visibility}sealed interface {name} {{\n")?;
         let mut permitted = permitted.iter();
         while let Some(variant) = permitted.next() {
@@ -186,6 +254,7 @@ impl<'a> Display for WithMethods<'a, JavaSealedInterface> {
 
 #[derive(Debug, Eq, PartialEq)]
 struct JavaFunction {
+    doc: Option<Rc<str>>,
     visibility: JavaVisibility,
     name: String,
     parameters: Vec<JavaFunctionParameter>,
@@ -202,12 +271,14 @@ struct JavaFunctionParameter {
 impl Display for JavaFunction {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         let Self {
+            doc,
             visibility,
             name,
             parameters,
             ret_type,
-            body // TODO print methods body
+            body
         } = self;
+        print_as_java_doc(f, "  ", doc, None)?;
         write!(f, "  {visibility}static {ret_type} {name}(")?;
         let mut parameters = parameters.iter();
         let mut is_first = true;
@@ -223,13 +294,12 @@ impl Display for JavaFunction {
         if let Some(ref op) = body.terminator_op {
             fn get(f: &mut Formatter<'_>, loc: &mut BTreeMap<usize, Rc<String>>, body: &JavaBody, v: &Rc<JavaValueRef>) -> Result<Rc<String>, core::fmt::Error> {
                 let op = body.ops.get(v.id()).ok_or(core::fmt::Error)?;
-                if Rc::strong_count(v) > 0 && !matches!(op, JavaOp::GetParam(_) | JavaOp::ConstLong(_) | JavaOp::ConstShort(_)) {
-                    // if Rc::strong_count(v) > 0 {
+                if !matches!(v.kind(), JavaValueKind::Var(_)) && !matches!(op, JavaOp::GetParam(_) | JavaOp::ConstLong(_) | JavaOp::ConstShort(_)) {
                     let id = Rc::as_ptr(v) as usize;
                     if let Some(v) = loc.get(&id).cloned() {
                         Ok(v)
                     } else {
-                        let expr = print_rec(f, loc, body, op)?;
+                        let expr = print_rec(f, loc, body, op, v.kind())?;
                         let var_name = Rc::new(format!("_{}", loc.len()));
                         loc.insert(id, var_name.clone());
                         write!(f, "    final {} {var_name} = {expr};\n", v.kind())?;
@@ -237,11 +307,15 @@ impl Display for JavaFunction {
                         Ok(var_name)
                     }
                 } else {
-                    Ok(print_rec(f, loc, body, op)?)
+                    Ok(print_rec(f, loc, body, op, v.kind())?)
                 }
             }
 
-            fn print_rec(f: &mut Formatter<'_>, loc: &mut BTreeMap<usize, Rc<String>>, body: &JavaBody, op: &JavaOp) -> Result<Rc<String>, core::fmt::Error> {
+            fn print_rec(f: &mut Formatter<'_>, loc: &mut BTreeMap<usize, Rc<String>>, body: &JavaBody, op: &JavaOp, kind: &JavaValueKind) -> Result<Rc<String>, core::fmt::Error> {
+                match kind {
+                    JavaValueKind::Var(v) => return Ok(Rc::new(v.0.clone())),
+                    _ => {}
+                }
                 match op {
                     JavaOp::ConstShort(n) => Ok(Rc::new(format!("{n}"))),
                     JavaOp::ConstLong(n) => Ok(Rc::new(format!("{n}"))),
@@ -406,6 +480,7 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
                     pkg: root_pkg.to_string(),
                     methods: Default::default(),
                     kind: JavaSymbolKind::Record(JavaRecord {
+                        doc: s.doc().cloned(),
                         visibility: JavaVisibility::from_type_scope(s.scope()),
                         name: s.name().to_string(),
                         implements: None,
@@ -413,6 +488,7 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
                             StructFields::Named(s) => s
                                 .iter()
                                 .filter_map(|f| Some(JavaField {
+                                    doc: f.doc().cloned(),
                                     name: f.name().to_string(),
                                     typ: match builder.convert_types(f.r#type()) {
                                         JavaType::Void => return None,
@@ -423,6 +499,7 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
                             StructFields::Tuple(s) => s
                                 .iter()
                                 .filter_map(|f| Some(JavaField {
+                                    doc: None,
                                     name: format!("_{}", f.offset()),
                                     typ: match builder.convert_types(f.r#type()) {
                                         JavaType::Void => return None,
@@ -438,11 +515,13 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
                     pkg: root_pkg.to_string(),
                     methods: Default::default(),
                     kind: JavaSymbolKind::SealedInterface(JavaSealedInterface {
+                        doc: e.doc().cloned(),
                         visibility: JavaVisibility::from_type_scope(e.scope()),
                         name: e.name().to_string(),
                         permitted: e.variants()
                             .iter()
                             .map(|v| JavaRecord {
+                                doc: v.doc().cloned(),
                                 visibility: JavaVisibility::PackagePrivate,
                                 name: v.name().to_string(),
                                 implements: Some(builder.by_fqdn
@@ -453,6 +532,7 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
                                     EnumVariantFields::Named(f) => f
                                         .iter()
                                         .filter_map(|f| Some(JavaField {
+                                            doc: f.doc().cloned(),
                                             name: f.name().to_string(),
                                             typ: match builder.convert_types(f.r#type()) {
                                                 JavaType::Void => return None,
@@ -463,6 +543,7 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
                                     EnumVariantFields::Tuple(f) => f
                                         .iter()
                                         .filter_map(|f| Some(JavaField {
+                                            doc: None,
                                             name: format!("_{}", f.offset()),
                                             typ: match builder.convert_types(f.r#type()) {
                                                 JavaType::Void => return None,
@@ -486,6 +567,7 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
             let ret_type = builder.convert_types(def.ret_type());
 
             let function = JavaFunction {
+                doc: def.doc().cloned(),
                 visibility: JavaVisibility::from_type_scope(def.scope()),
                 name: def.name().to_string(),
                 parameters: def.params()
@@ -596,12 +678,13 @@ impl<'a> TryFrom<(&'a Body, &'a JavaModuleBuilder<'_>, &'a JavaModule)> for Java
             .collect::<Vec<_>>();
         Ok(Self::new_with_dyn_params(params.as_slice(), |b, args| {
             let mut mapping: BTreeMap<usize, Rc<JavaValueRef>> = BTreeMap::new();
-            let def = Rc::new(b.push(JavaOp::ConstLong(-1), JavaType::Long.into())?);
+            let def = b.push(JavaOp::ConstLong(-1), JavaType::Long.into())?;
             for (id, op) in pb.ops.iter().enumerate() {
                 let (jop, kind) = match op {
                     Op::Label(v, n) => {
                         if v.is_param() {
-                            (JavaOp::GetParam(Rc::new(n.clone())), JavaValueKind::Never)
+                            let s = builder.convert_kind(v.kind());
+                            (JavaOp::GetParam(Rc::new(n.clone())), JavaValueKind::Var(Rc::new((n.clone(), s))))
                         } else {
                             let Some(v) = mapping.get(&v.id()).cloned() else { continue; };
                             let k = v.kind().clone();
@@ -658,7 +741,7 @@ impl<'a> TryFrom<(&'a Body, &'a JavaModuleBuilder<'_>, &'a JavaModule)> for Java
                     Op::Match(_, _) => continue,
                 };
                 let r = b.push(jop, kind)?;
-                mapping.insert(id, Rc::new(r));
+                mapping.insert(id, r);
             }
             if let Some(TerminatorOp::Yield(ref v)) = pb.terminator_op {
                 if let Some(v) = mapping.get(&v.id()).cloned() {
@@ -682,6 +765,7 @@ fn new_point(x: i16, y: i16) -> Point {
   }
 }
 
+/// Doc is also supported *_*
 fn new_rect(x: i16, y: i16, w: i16, h: i16) -> Rectangle {
   Rectangle {
     origin: new_point(x, y),
@@ -698,22 +782,32 @@ fn times2(v: i16) -> i16 {
 
 // declaration order shouldn't matter
 
+/// A simple shape
 struct Rectangle {
   origin: Point,
+
+  /// Dimensions, in pixels
   size: Size,
 }
 
 pub struct Size {
+  /// W
   width: i16,
+  /// H
   height: i16,
 }
 
+/// A point with a X and Y coordinate
+///
+/// NOTE: coordinates are i16 since Skrull doesn't support isize primitive type yet.
 struct Point {
   x: i16,
   y: i16
 }
 
+/// Shapes we are able to create
 enum Shape {
+  /// The simplest shape available
   Rect(Rectangle),
 }
 "#)?)?;
@@ -724,8 +818,14 @@ enum Shape {
         java.resolve("my_first_module.Shape").map(ToString::to_string),
         /*language=java*/Some(r#"package my_first_module;
 
+/**
+ * Shapes we are able to create
+ */
 sealed interface Shape {
 
+/**
+ * The simplest shape available
+ */
 record Rect(
   my_first_module.Rectangle _0
 ) implements my_first_module.Shape { }
@@ -738,6 +838,10 @@ record Rect(
         java.resolve("my_first_module.Size").map(ToString::to_string),
         /*language=java*/Some(r#"package my_first_module;
 
+/**
+ * @param width W
+ * @param height H
+ */
 public record Size(
   short width,
   short height
@@ -748,6 +852,11 @@ public record Size(
         java.resolve("my_first_module.Point").map(ToString::to_string),
         /*language=java*/Some(r#"package my_first_module;
 
+/**
+ * A point with a X and Y coordinate
+ * <p>
+ * NOTE: coordinates are i16 since Skrull doesn't support isize primitive type yet.
+ */
 record Point(
   short x,
   short y
@@ -767,11 +876,19 @@ record Point(
         java.resolve("my_first_module.Rectangle").map(ToString::to_string),
         /*language=java*/Some(r#"package my_first_module;
 
+/**
+ * A simple shape
+ *
+ * @param size Dimensions, in pixels
+ */
 record Rectangle(
   my_first_module.Point origin,
   my_first_module.Size size
 ) {
 
+  /**
+   * Doc is also supported *_*
+   */
   static my_first_module.Rectangle new_rect(short x, short y, short w, short h) {
     final my_first_module.Point _0 = my_first_module.Point.new_point(x, y);
     final my_first_module.Size _1 = new my_first_module.Size(w, h);
@@ -786,15 +903,18 @@ record Rectangle(
         pkg: "my_first_module".to_string(),
         methods: Default::default(),
         kind: JavaSymbolKind::Record(JavaRecord {
+            doc: None,
             visibility: JavaVisibility::Public,
             name: "Size".to_string(),
             implements: None,
             fields: vec![
                 JavaField {
+                    doc: Some(Rc::from(" W")),
                     name: "width".to_string(),
                     typ: JavaType::Short,
                 },
                 JavaField {
+                    doc: Some(Rc::from(" H")),
                     name: "height".to_string(),
                     typ: JavaType::Short,
                 },

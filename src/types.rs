@@ -8,10 +8,11 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::cmp::Ordering;
 use core::fmt::{Debug, Display, Formatter};
+use core::mem::take;
 
 use crate::bytecode::{Body, MatchCaseOp, MatchPatternOp, SymbolRefOrEnum, TerminatorOp, ValueKind, ValueRef};
 use crate::lexer::Token;
-use crate::parser::{BlockExpression, Declaration, Enum, Expression, Fields, FunctionDeclaration, FunctionPrototype, Identifier, MatchExpression, MatchPattern, parse_declaration, Qualifier, Struct, Type, Visibility};
+use crate::parser::{BlockExpression, Declaration, DocBlock, Enum, Expression, Fields, FunctionDeclaration, FunctionPrototype, Identifier, MatchExpression, MatchPattern, parse_declaration, Qualifier, Struct, Type, Visibility};
 
 type Result<T> = core::result::Result<T, Cow<'static, str>>;
 
@@ -206,11 +207,26 @@ impl<'a> SymbolLoader for PendingProcessing<'a> {
     }
 }
 
+fn format_doc(doc: DocBlock) -> Option<Rc<str>> {
+    let doc = doc.into_vec();
+    if doc.is_empty() {
+        None
+    } else {
+        Some(doc
+            .iter()
+            .map(|l| l.content)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into())
+    }
+}
+
 impl<'a> SymbolLoader for Struct<'a> {
     type Symbol = StructDef;
 
     fn load(self, ctx: &impl LoaderContext) -> Result<Self::Symbol> {
         Ok(StructDef {
+            doc: format_doc(self.doc),
             scope: Scope::from(self.visibility),
             name: self.name.as_ref().to_string(),
             fields: load_struct_fields(ctx, self.body)
@@ -231,12 +247,13 @@ fn load_type(ctx: &impl LoaderContext, typ: Type) -> Result<TypeRef> {
     })
 }
 
-fn load_named_field(ctx: &impl LoaderContext, x: crate::parser::NamedField) -> Result<NamedField> {
+fn load_named_field(ctx: &impl LoaderContext, nf: crate::parser::NamedField) -> Result<NamedField> {
     Ok(NamedField {
-        scope: Scope::from(x.visibility),
-        name: x.name.as_ref().to_string(),
-        typ: load_type(ctx, x.typ)
-            .map_err(|e| format!("field '{}': {e}", x.name.as_ref()))?,
+        doc: format_doc(nf.doc),
+        scope: Scope::from(nf.visibility),
+        name: nf.name.as_ref().to_string(),
+        typ: load_type(ctx, nf.typ)
+            .map_err(|e| format!("field '{}': {e}", nf.name.as_ref()))?,
     })
 }
 
@@ -271,10 +288,11 @@ fn load_struct_fields(ctx: &impl LoaderContext, fields: Fields) -> Result<Struct
     })
 }
 
-fn load_enum_variant(ctx: &impl LoaderContext, x: crate::parser::EnumVariant) -> Result<EnumVariant> {
+fn load_enum_variant(ctx: &impl LoaderContext, ev: crate::parser::EnumVariant) -> Result<EnumVariant> {
     Ok(EnumVariant {
-        name: x.name.as_ref().to_string(),
-        fields: match x.fields {
+        doc: format_doc(ev.doc),
+        name: ev.name.as_ref().to_string(),
+        fields: match ev.fields {
             Fields::NamedFields(fields) => EnumVariantFields::Named(load_named_fields(ctx, fields)?),
             Fields::TupleFields(fields) => EnumVariantFields::Tuple(load_tuple_fields(ctx, fields)?),
             Fields::Unit => EnumVariantFields::Unit
@@ -287,6 +305,7 @@ impl<'a> SymbolLoader for Enum<'a> {
 
     fn load(self, ctx: &impl LoaderContext) -> Result<Self::Symbol> {
         Ok(EnumDef {
+            doc: format_doc(self.doc),
             scope: Scope::from(self.visibility),
             name: self.name.as_ref().to_string(),
             variants: self.body
@@ -306,13 +325,13 @@ impl<'a> BlockExpression<'a> {
                 .map(type_ref_to_value_kind)
                 .collect::<Vec<_>>()
                 .as_ref(),
-            |b, v| {
+            |b, mut v| {
                 let params: BTreeMap<String, ValueRef> = parameters
                     .iter()
                     .enumerate()
                     .map(|(i, p)| Ok((
                         p.name().to_string(),
-                        b.label(v[i].clone(), p.name().to_string())?
+                        b.label(take(&mut v[i]), p.name().to_string())?
                     )))
                     .collect::<Result<BTreeMap<_, _>>>()?;
 
@@ -663,6 +682,7 @@ impl<'a> SymbolLoader for FunctionPrototype<'a> {
 
     fn load(self, ctx: &impl LoaderContext) -> Result<Self::Symbol> {
         Ok(FunctionDef {
+            doc: format_doc(self.doc),
             scope: Scope::from(self.visibility),
             name: self.name.as_ref().to_string(),
             params: self.parameters
@@ -693,14 +713,31 @@ fn type_ref_to_value_kind(typ: &TypeRef) -> ValueKind {
     }
 }
 
+pub fn value_kind_to_type_ref(typ: &ValueKind) -> Option<TypeRef> {
+    Some(match typ {
+        ValueKind::Unit => TypeRef::Primitive(PrimitiveType::Unit),
+        ValueKind::I64 => TypeRef::Primitive(PrimitiveType::I64),
+        ValueKind::I16 => TypeRef::Primitive(PrimitiveType::I16),
+        ValueKind::F64 => TypeRef::Primitive(PrimitiveType::F64),
+        ValueKind::Usize => TypeRef::Primitive(PrimitiveType::Usize),
+        ValueKind::Type(sym) => TypeRef::Ref(sym.clone()),
+        _ => return None
+    })
+}
+
 #[derive(Debug)]
 pub struct StructDef {
+    doc: Option<Rc<str>>,
     scope: Scope,
     name: String,
     fields: StructFields,
 }
 
 impl StructDef {
+    pub fn doc(&self) -> Option<&Rc<str>> {
+        self.doc.as_ref()
+    }
+
     pub fn scope(&self) -> Scope {
         self.scope
     }
@@ -716,12 +753,17 @@ impl StructDef {
 
 #[derive(Debug)]
 pub struct EnumDef {
+    doc: Option<Rc<str>>,
     scope: Scope,
     name: String,
     variants: Vec<EnumVariant>,
 }
 
 impl EnumDef {
+    pub fn doc(&self) -> Option<&Rc<str>> {
+        self.doc.as_ref()
+    }
+
     pub fn scope(&self) -> Scope {
         self.scope
     }
@@ -758,6 +800,7 @@ impl Parameter {
 
 #[derive(Debug)]
 pub struct FunctionDef {
+    doc: Option<Rc<str>>,
     scope: Scope,
     name: String,
     params: Vec<Parameter>,
@@ -766,6 +809,10 @@ pub struct FunctionDef {
 }
 
 impl FunctionDef {
+    pub fn doc(&self) -> Option<&Rc<str>> {
+        self.doc.as_ref()
+    }
+
     pub fn scope(&self) -> Scope {
         self.scope
     }
@@ -789,11 +836,16 @@ impl FunctionDef {
 
 #[derive(Debug)]
 pub struct EnumVariant {
+    doc: Option<Rc<str>>,
     name: String,
     fields: EnumVariantFields,
 }
 
 impl EnumVariant {
+    pub fn doc(&self) -> Option<&Rc<str>> {
+        self.doc.as_ref()
+    }
+
     pub fn name(&self) -> &str {
         self.name.as_ref()
     }
@@ -840,12 +892,17 @@ pub enum StructFields {
 
 #[derive(Debug)]
 pub struct NamedField {
+    doc: Option<Rc<str>>,
     scope: Scope,
     name: String,
     typ: TypeRef,
 }
 
 impl NamedField {
+    pub fn doc(&self) -> Option<&Rc<str>> {
+        self.doc.as_ref()
+    }
+
     pub fn scope(&self) -> Scope {
         self.scope
     }

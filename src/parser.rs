@@ -3,6 +3,7 @@ use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use crate::lexer::{Token, TokenKind};
 use crate::lexer::TokenKind::*;
@@ -137,8 +138,16 @@ pub enum Expression<'a> {
 }
 
 #[derive(Eq, PartialEq, Debug)]
+pub struct DocLine<'a> {
+    pub content: &'a str,
+    pub loc: Range<usize>,
+}
+
+pub type DocBlock<'a> = Box<[DocLine<'a>]>;
+
+#[derive(Eq, PartialEq, Debug)]
 pub struct FunctionPrototype<'a> {
-    pub doc: Box<[&'a str]>,
+    pub doc: DocBlock<'a>,
     pub visibility: Visibility,
     pub name: Identifier<'a>,
     pub parameters: Vec<VariableSymbolDeclaration<'a>>,
@@ -198,7 +207,7 @@ impl<'a> AsRef<str> for Identifier<'a> {
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct NamedField<'a> {
-    pub doc: Box<[&'a str]>,
+    pub doc: DocBlock<'a>,
     pub visibility: Visibility,
     pub name: Identifier<'a>,
     pub typ: Type<'a>,
@@ -219,14 +228,14 @@ pub enum Fields<'a> {
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct EnumVariant<'a> {
-    pub doc: Box<[&'a str]>,
+    pub doc: DocBlock<'a>,
     pub name: Identifier<'a>,
     pub fields: Fields<'a>,
 }
 
 #[derive(Eq, PartialEq, Debug)]
 pub struct StructOrEnum<'a, T> {
-    pub doc: Box<[&'a str]>,
+    pub doc: DocBlock<'a>,
     pub visibility: Visibility,
     pub name: Identifier<'a>,
     pub body: T,
@@ -237,6 +246,10 @@ pub type Enum<'a> = StructOrEnum<'a, Vec<EnumVariant<'a>>>;
 
 fn peek_token<'a, 'b>(tokens: &'a mut Vec<Token<'b>>) -> Option<&'a TokenKind<'b>> {
     tokens.get(0).map(|t| &t.kind)
+}
+
+fn peek_token_with_loc<'a, 'b>(tokens: &'a mut Vec<Token<'b>>) -> Option<(&'a TokenKind<'b>, Range<usize>)> {
+    tokens.get(0).map(|t| (&t.kind, t.offset.clone()))
 }
 
 fn eat_token(tokens: &mut Vec<Token>, expected: TokenKind) -> Option<()> {
@@ -264,7 +277,7 @@ fn parse_optional_group_with_dotdot<'a, T, F: Fn(&mut Vec<Token<'a>>) -> Result<
     tokens: &mut Vec<Token<'a>>,
     parse: F,
     open: TokenKind,
-    close: TokenKind
+    close: TokenKind,
 ) -> Result<(Option<(Vec<T>, bool)>)> {
     if !eat_token(tokens, open).is_some() {
         return Ok(None);
@@ -285,12 +298,15 @@ fn parse_optional_group_with_dotdot<'a, T, F: Fn(&mut Vec<Token<'a>>) -> Result<
     Ok(Some((items, dotdot_at_end)))
 }
 
-fn parse_doc_comments<'a>(tokens: &mut Vec<Token<'a>>) -> Box<[&'a str]> {
+fn parse_doc_comments<'a>(tokens: &mut Vec<Token<'a>>) -> DocBlock<'a> {
     let mut result = vec![];
-    while let Some(DocComment(content)) = peek_token(tokens) {
+    while let Some((DocComment(content), loc)) = peek_token_with_loc(tokens) {
         let content = *content;
         tokens.remove(0);
-        result.push(content);
+        result.push(DocLine {
+            content,
+            loc,
+        });
     }
     result.into_boxed_slice()
 }
@@ -333,7 +349,7 @@ fn parse_qualifier_inner<'a>(segment: Identifier<'a>, parent: Option<Rc<Qualifie
         parse_qualifier_inner(
             parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected an identifier")?,
             Some(Rc::new(qualifier)),
-            tokens
+            tokens,
         )?
     })
 }
@@ -342,7 +358,7 @@ fn parse_qualifier<'a>(segment: Identifier<'a>, tokens: &mut Vec<Token<'a>>) -> 
     parse_qualifier_inner(
         segment,
         None,
-        tokens
+        tokens,
     )
 }
 
@@ -428,7 +444,7 @@ pub fn parse_fields<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Fields<'a>> {
     })
 }
 
-fn parse_struct_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility, doc: Box<[&'a str]>) -> Result<Struct<'a>> {
+fn parse_struct_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility, doc: DocBlock<'a>) -> Result<Struct<'a>> {
     eat_token(tokens, Symbol("struct")).unwrap_or_expected_at(tokens, "expected the struct keyword")?;
     let name = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected a struct name")?;
     let body = parse_fields(tokens)?;
@@ -465,7 +481,7 @@ pub fn parse_enum_variant<'a>(tokens: &mut Vec<Token<'a>>) -> Result<EnumVariant
     })
 }
 
-fn parse_enum_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility, doc: Box<[&'a str]>) -> Result<Enum<'a>> {
+fn parse_enum_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility, doc: DocBlock<'a>) -> Result<Enum<'a>> {
     eat_token(tokens, Symbol("enum")).unwrap_or_expected_at(tokens, "expected the enum keyword")?;
     let name = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected a enum name")?;
     let body = parse_group(tokens, parse_enum_variant, BraceOpen, BraceClose)
@@ -723,7 +739,7 @@ fn parse_return_type<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Option<Type<'a>>
     })
 }
 
-fn parse_function_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility, doc: Box<[&'a str]>) -> Result<FunctionDeclaration<'a>> {
+fn parse_function_inner<'a>(tokens: &mut Vec<Token<'a>>, visibility: Visibility, doc: DocBlock<'a>) -> Result<FunctionDeclaration<'a>> {
     eat_token(tokens, Symbol("fn")).unwrap_or_expected_at(tokens, "expected the `fn` keyword")?;
     let name = parse_identifier(tokens).unwrap_or_expected_at(tokens, "expected a function name")?;
     let parameters = parse_group(tokens, parse_parameter, ParenthesisOpen, ParenthesisClose)
@@ -769,6 +785,11 @@ pub fn parse_declaration<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Declaration<
 }
 
 
+#[cfg(test)]
+fn dl(loc: Range<usize>, content: &str) -> DocLine {
+    DocLine { content, loc }
+}
+
 #[test]
 fn it_tokenize_struct_with_keywords_as_identifiers() -> Result<()> {
     let mut tokens = Token::parse_ascii(r#"pub struct Token {
@@ -795,8 +816,8 @@ fn it_tokenize_struct_with_keywords_as_identifiers() -> Result<()> {
                 },
                 NamedField {
                     doc: Box::new([
-                        " Unlike Rust, Skrull supports keywords as identifiers natively ! :D",
-                        " (not everywhere actually but it's still cool ^^')"
+                        dl(43..113, " Unlike Rust, Skrull supports keywords as identifiers natively ! :D"),
+                        dl(116..169, " (not everywhere actually but it's still cool ^^')"),
                     ]),
                     visibility: Visibility::Pub,
                     name: Identifier("pub"),
@@ -828,8 +849,8 @@ pub enum TokenKind {
     assert_eq!(
         Enum {
             doc: Box::new([
-                " The kind of token that can be encountered",
-                "     in this language"
+                dl(1..46, " The kind of token that can be encountered"),
+                dl(47..71, "     in this language"),
             ]),
             visibility: Visibility::Pub,
             name: Identifier("TokenKind"),
@@ -841,7 +862,7 @@ pub enum TokenKind {
                 },
                 EnumVariant {
                     doc: Box::new([
-                        " Should always generate an error when present"
+                        dl(137..185, " Should always generate an error when present"),
                     ]),
                     name: Identifier("Unexpected"),
                     fields: Fields::NamedFields(vec![

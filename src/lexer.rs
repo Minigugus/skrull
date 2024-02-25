@@ -39,7 +39,7 @@ pub enum TokenKind<'a> {
 #[derive(Eq, PartialEq, Clone)]
 pub struct Token<'a> {
     pub kind: TokenKind<'a>,
-    offset: Range<usize>,
+    pub offset: Range<usize>,
 }
 
 impl<'a> Debug for Token<'a> {

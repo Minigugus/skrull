@@ -2,6 +2,7 @@ use alloc::{format, vec};
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
@@ -12,14 +13,14 @@ use crate::types::{Module, ModuleBuilder, ResolverContext, StructFields, Symbol,
 
 type Result<T> = core::result::Result<T, Cow<'static, str>>;
 
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Default, Eq, PartialEq)]
 pub struct AnyValueRef<T> {
     id: usize,
     param: bool,
     kind: T,
 }
 
-pub type ValueRef = AnyValueRef<ValueKind>;
+pub type ValueRef = Rc<AnyValueRef<ValueKind>>;
 
 impl<T> AnyValueRef<T> {
     pub fn id(&self) -> usize {
@@ -34,12 +35,12 @@ impl<T> AnyValueRef<T> {
         self.param
     }
 
-    pub fn map(&self, id: usize) -> Self where T: Clone {
-        Self {
+    pub fn map(&self, id: usize) -> Rc<Self> where T: Clone {
+        Rc::new(Self {
             id,
             param: true,
             kind: self.kind.clone(),
-        }
+        })
     }
 }
 
@@ -63,8 +64,9 @@ impl<T: Eq> Ord for AnyValueRef<T> {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Default, Debug, Clone, Eq, PartialEq)]
 pub enum ValueKind {
+    #[default]
     Never,
     Unit,
     Bool,
@@ -203,7 +205,7 @@ impl<T, U, V> Default for AnyBody<T, U, V> {
 impl<T, U, V> AnyBody<T, U, V> {
     pub fn new_with_dyn_params(
         params: &[V],
-        ops: impl FnOnce(&mut Self, &[AnyValueRef<V>]) -> Result<U>,
+        ops: impl FnOnce(&mut Self, Box<[Rc<AnyValueRef<V>>]>) -> Result<U>,
     ) -> Result<Self> where V: Clone {
         let mut i = 0usize;
         let param_refs = params
@@ -212,11 +214,11 @@ impl<T, U, V> AnyBody<T, U, V> {
             .map(|kind| {
                 let id = i;
                 i += 1;
-                AnyValueRef {
+                Rc::new(AnyValueRef {
                     id,
                     param: true,
                     kind,
-                }
+                })
             })
             .collect::<Vec<_>>();
         let mut body = Self {
@@ -226,20 +228,21 @@ impl<T, U, V> AnyBody<T, U, V> {
             next_ref_id: 0,
             ret_kind: None,
         };
-        let terminator_op = (ops)(&mut body, &param_refs)?;
+        let terminator_op = (ops)(&mut body, param_refs.into_boxed_slice())?;
         body.terminator_op = Some(terminator_op);
         Ok(body)
     }
-    fn new_with_params<const N: usize>(params: &[V; N]) -> (Self, [AnyValueRef<V>; N]) where V: Clone {
+
+    fn new_with_params<const N: usize>(params: &[V; N]) -> (Self, [Rc<AnyValueRef<V>>; N]) where V: Clone {
         let mut i = 0usize;
         let param_refs = params.clone().map(|kind| {
             let id = i;
             i += 1;
-            AnyValueRef {
+            Rc::new(AnyValueRef {
                 id,
                 param: true,
                 kind,
-            }
+            })
         });
         (Self {
             ops: Default::default(),
@@ -252,7 +255,7 @@ impl<T, U, V> AnyBody<T, U, V> {
 
     fn new_with_params_and_ops<const N: usize>(
         params: &[V; N],
-        ops: impl FnOnce(&mut Self, [AnyValueRef<V>; N]) -> Result<U>,
+        ops: impl FnOnce(&mut Self, [Rc<AnyValueRef<V>>; N]) -> Result<U>,
     ) -> Result<Self> where V: Clone {
         let (mut body, params) = Self::new_with_params(params);
         let terminator_op = (ops)(&mut body, params)?;
@@ -262,8 +265,8 @@ impl<T, U, V> AnyBody<T, U, V> {
 
     pub fn derive(
         &self,
-        ops: impl FnOnce(&mut Self) -> Result<(Box<[AnyValueRef<V>]>, U)>,
-    ) -> Result<(Box<[AnyValueRef<V>]>, Box<Self>)> where V: Clone {
+        ops: impl FnOnce(&mut Self) -> Result<(Box<[Rc<AnyValueRef<V>>]>, U)>,
+    ) -> Result<(Box<[Rc<AnyValueRef<V>>]>, Box<Self>)> where V: Clone {
         let mut body = Self {
             ops: Default::default(),
             terminator_op: None,
@@ -280,8 +283,8 @@ impl<T, U, V> AnyBody<T, U, V> {
     pub fn derive_with_params(
         &self,
         params: &[V],
-        ops: impl FnOnce(&mut Self, &[AnyValueRef<V>]) -> Result<(Box<[AnyValueRef<V>]>, U)>,
-    ) -> Result<(Box<[AnyValueRef<V>]>, Box<Self>)> where V: Clone {
+        ops: impl FnOnce(&mut Self, &[Rc<AnyValueRef<V>>]) -> Result<(Box<[Rc<AnyValueRef<V>>]>, U)>,
+    ) -> Result<(Box<[Rc<AnyValueRef<V>>]>, Box<Self>)> where V: Clone {
         let mut i = 0usize;
         let param_refs = params
             .iter()
@@ -289,11 +292,11 @@ impl<T, U, V> AnyBody<T, U, V> {
             .map(|kind| {
                 let id = i;
                 i += 1;
-                AnyValueRef {
+                Rc::new(AnyValueRef {
                     id,
                     param: true,
                     kind,
-                }
+                })
             })
             .collect::<Vec<_>>();
         let mut body = Self {
@@ -317,15 +320,15 @@ impl<T, U, V> AnyBody<T, U, V> {
         self.ret_kind.as_ref()
     }
 
-    pub(crate) fn push(&mut self, op: T, kind: V) -> Result<AnyValueRef<V>> where V: Clone {
+    pub(crate) fn push(&mut self, op: T, kind: V) -> Result<Rc<AnyValueRef<V>>> where V: Clone {
         self.ops.push(op);
         let id = self.next_ref_id;
         self.next_ref_id += 1;
-        Ok(AnyValueRef {
+        Ok(Rc::new(AnyValueRef {
             id,
             param: false,
             kind,
-        })
+        }))
     }
 }
 
