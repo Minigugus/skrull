@@ -10,8 +10,9 @@ use core::cmp::Ordering;
 use core::fmt::{Debug, Display, Formatter};
 use core::mem::take;
 
-use crate::bytecode::{Body, MatchCaseOp, MatchPatternOp, SymbolRefOrEnum, TerminatorOp, ValueKind, ValueRef};
+use crate::bytecode::{BlockBuilderN, Body, BodyN, MatchCaseOp, MatchCaseOpN, MatchPatternOp, SymbolRefOrEnum, TerminatorOp, TerminatorOpN, ValueKind, ValueRef, ValueRefN};
 use crate::lexer::Token;
+use crate::mlir::ops::Typed;
 use crate::parser::{BlockExpression, Declaration, DocBlock, Enum, Expression, Fields, FunctionDeclaration, FunctionPrototype, Identifier, MatchExpression, MatchPattern, parse_declaration, Qualifier, Struct, Type, Visibility};
 
 type Result<T> = core::result::Result<T, Cow<'static, str>>;
@@ -77,12 +78,12 @@ impl From<Visibility> for Scope {
     }
 }
 
-#[derive(Debug, Clone)]
-#[cfg(not(test))]
-pub struct SymbolRef(u32, SymbolType);
+// #[derive(Debug, Clone)]
+// #[cfg(not(test))]
+// pub struct SymbolRef(u32, SymbolType);
 
 #[derive(Debug, Clone)]
-#[cfg(test)]
+// #[cfg(test)]
 pub struct SymbolRef(pub u32, pub SymbolType);
 
 impl Eq for SymbolRef {}
@@ -675,6 +676,361 @@ impl<'a> BlockExpression<'a> {
             },
         )?)
     }
+
+    pub fn to_fn_body0(&self, parameters: &[Parameter], ctx: &impl LoaderContext) -> Result<BodyN> {
+        let param_types = parameters
+            .iter()
+            .map(Parameter::typ)
+            .map(type_ref_to_value_kind)
+            .collect::<Vec<_>>();
+        Ok(BodyN::isolated(
+            param_types.as_slice(),
+            |b, mut v| {
+                let params: BTreeMap<String, ValueRefN> = parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| Ok((
+                        p.name().to_string(),
+                        b.label(v[i].clone(), p.name().to_string())?
+                    )))
+                    .collect::<Result<BTreeMap<_, _>>>()?;
+
+                trait Scope {
+                    fn read_variable(&self, name: &Identifier) -> Result<ValueRefN>;
+                }
+
+                impl Scope for BTreeMap<String, ValueRefN> {
+                    fn read_variable(&self, name: &Identifier) -> Result<ValueRefN> {
+                        self.get(name.as_ref()).cloned().ok_or_else(|| format!("variable not defined in scope: {name:?}").into())
+                    }
+                }
+
+                struct MatchCaseScope<'a, T: ?Sized>(&'a T, &'a BTreeMap<&'a str, ValueRefN>);
+
+                impl<'a, T: Scope + ?Sized> Scope for MatchCaseScope<'a, T> {
+                    fn read_variable(&self, name: &Identifier) -> Result<ValueRefN> {
+                        if let Some(v) = self.1.get(name.0) {
+                            Ok(v.clone())
+                        } else {
+                            self.0.read_variable(name)
+                        }
+                    }
+                }
+
+                fn visit_expr(b: &mut BlockBuilderN, ctx: &impl LoaderContext, v: &dyn Scope, expr: &Expression) -> Result<ValueRefN> {
+                    Ok(match expr {
+                        Expression::Unit => b.const_unit()?,
+                        Expression::Literal(v) => b.const_i64(*v)?,
+                        Expression::Identifier(n) => v.read_variable(n)?,
+                        Expression::Block(e) => {
+                            let e = visit_block(b, ctx, v, e)?;
+                            b.block_op(e)?
+                        }
+                        Expression::Neg(e) => {
+                            let e = visit_expr(b, ctx, v, e)?;
+                            b.neg(e)?
+                        }
+                        Expression::Mul(l, r) => {
+                            let l = visit_expr(b, ctx, v, l)?;
+                            let r = visit_expr(b, ctx, v, r)?;
+                            b.mul(l, r)?
+                        }
+                        Expression::Add(l, r) => {
+                            let l = visit_expr(b, ctx, v, l)?;
+                            let r = visit_expr(b, ctx, v, r)?;
+                            b.add(l, r)?
+                        }
+                        Expression::Gt(l, r) => {
+                            let l = visit_expr(b, ctx, v, l)?;
+                            let r = visit_expr(b, ctx, v, r)?;
+                            b.gt(l, r)?
+                        }
+                        Expression::If(c, t, f) => {
+                            let c = visit_expr(b, ctx, v, c)?;
+                            let t = visit_block(b, ctx, v, t)?;
+                            let f = visit_block(b, ctx, v, f)?;
+
+                            b.if_expr(c, t, f)?
+                        }
+                        Expression::Call(f, a) => {
+                            let f = ctx.get_symbol_ref_from_name(f.as_ref()).or(Err(format!("Function not defined: {:}", f.as_ref())))?;
+                            let ret_type = match ctx.get_symbol_from_ref(&f)? {
+                                Symbol::Function(fd) => type_ref_to_value_kind(&fd.ret_type),
+                                _ => return Err("Symbol isn't callable")?
+                            };
+                            let args = a
+                                .iter()
+                                .map(|e| visit_expr(b, ctx, v, e))
+                                .collect::<Result<Vec<_>>>()?;
+                            b.call(f, ret_type, args)?
+                        }
+                        Expression::Create(s, fs) => {
+                            let sn = s.as_ref();
+                            let s = ctx.get_symbol_ref_from_name(sn).or(Err(format!("Struct '{sn}' not defined")))?;
+                            if !matches!(s.1, SymbolType::Struct) {
+                                return Err(format!("'{sn}' isn't a named struct"))?;
+                            }
+                            let mut duplicates = BTreeSet::new();
+                            let mut initializers = BTreeMap::new();
+                            for (field, value) in fs {
+                                let field = field.as_ref();
+                                let value = visit_expr(b, ctx, v, value)?;
+                                if initializers.insert(field, value).is_some() {
+                                    duplicates.insert(field);
+                                }
+                            }
+                            if !duplicates.is_empty() {
+                                let duplicates = duplicates
+                                    .into_iter()
+                                    .collect::<Vec<_>>()
+                                    .join("', '");
+                                return Err(format!("Multiple initializers for fields '{duplicates}' while creating struct '{sn}'"))?;
+                            }
+                            let fs = initializers
+                                .into_iter()
+                                .map(|(n, v)| (n.to_owned(), v))
+                                .collect::<Vec<_>>();
+                            b.create(s, fs)?
+                        }
+                        Expression::Match(m) => {
+                            fn visit_qualifier(
+                                ctx: &impl LoaderContext,
+                                qualifier: &Qualifier,
+                            ) -> Result<SymbolRefOrEnum> {
+                                if let Some(ref p) = qualifier.parent {
+                                    Ok(SymbolRefOrEnum::Enum(
+                                        ctx.get_symbol_ref_from_qualifier(&*p)?,
+                                        qualifier.segment.as_ref().to_string(),
+                                    ))
+                                } else {
+                                    Ok(SymbolRefOrEnum::Type(
+                                        ctx.get_symbol_ref_from_qualifier(qualifier)?
+                                    ))
+                                }
+                            }
+
+                            fn visit_pattern<'a>(
+                                e: &ValueKind,
+                                pattern: &'a MatchPattern,
+                                ctx: &'a impl LoaderContext,
+                                vars_by_name: &mut BTreeMap<&'a str, (usize, ValueKind)>,
+                            ) -> Result<MatchPatternOp> {
+                                Ok(match pattern {
+                                    MatchPattern::Unit => MatchPatternOp::Unit,
+                                    MatchPattern::Wildcard => MatchPatternOp::Wildcard,
+                                    MatchPattern::Variable(name) => {
+                                        let id = vars_by_name.len();
+                                        MatchPatternOp::Variable(
+                                            vars_by_name
+                                                .entry(name.as_ref())
+                                                .or_insert_with(|| (id, e.clone()))
+                                                .0
+                                        )
+                                    }
+                                    MatchPattern::Union(p) => MatchPatternOp::Union(p
+                                        .iter()
+                                        .map(|p| visit_pattern(e, p, ctx, vars_by_name))
+                                        .collect::<Result<Vec<_>>>()?),
+                                    MatchPattern::NumberLiteral(n) => MatchPatternOp::NumberLiteral(n.clone()),
+                                    MatchPattern::StringLiteral(s) => MatchPatternOp::StringLiteral(s.to_string()),
+                                    MatchPattern::IsEnumOrType(q) => MatchPatternOp::IsTypeOrEnum(visit_qualifier(ctx, q)?),
+                                    MatchPattern::TupleStruct { typ, params, exact } => {
+                                        let typ = visit_qualifier(ctx, typ)?;
+                                        let s = ctx.get_symbol_from_ref(typ.owner_type())?;
+                                        let (name, fields) = match s {
+                                            Symbol::Struct(StructDef { fields: StructFields::Tuple(fields), name, .. }) => (name, fields),
+                                            s => return Err(format!("{s:?} isn't a tuple struct").into())
+                                        };
+
+                                        let m = params.len();
+
+                                        MatchPatternOp::TupleStruct {
+                                            typ,
+                                            params: params
+                                                .iter()
+                                                .enumerate()
+                                                .map(|(i, p)| {
+                                                    if let Some(f) = fields.get(i) {
+                                                        let typ = type_ref_to_value_kind(f.r#type());
+                                                        visit_pattern(&typ, p, ctx, vars_by_name)
+                                                    } else {
+                                                        let n = fields.len();
+                                                        Err(format!("Tuple struct {name} has only {n} fields but there are {m} in the pattern").into())
+                                                    }
+                                                })
+                                                .collect::<Result<Vec<_>>>()?,
+                                            exact: exact.clone(),
+                                        }
+                                    }
+                                    MatchPattern::FieldStruct { typ, params, exact } => {
+                                        let typ = visit_qualifier(ctx, typ)?;
+                                        let s = ctx.get_symbol_from_ref(typ.owner_type())?;
+                                        let (name, fields) = match s {
+                                            Symbol::Struct(StructDef { fields: StructFields::Named(fields), name, .. }) => (name, fields),
+                                            s => return Err(format!("{s:?} isn't a field struct").into())
+                                        };
+
+                                        let fields = fields
+                                            .iter()
+                                            .map(|x| (x.name.as_str(), x))
+                                            .collect::<BTreeMap<_, _>>();
+
+                                        MatchPatternOp::FieldStruct {
+                                            typ,
+                                            params: params
+                                                .iter()
+                                                .map(|(i, p)| {
+                                                    if let Some(f) = fields.get(i.as_ref()) {
+                                                        let typ = type_ref_to_value_kind(f.r#type());
+                                                        Ok((
+                                                            i.as_ref().to_string(),
+                                                            visit_pattern(&typ, p, ctx, vars_by_name)?
+                                                        ))
+                                                    } else {
+                                                        Err(format!("Field struct {name} doesn't have field {i:?}").into())
+                                                    }
+                                                })
+                                                .collect::<Result<Vec<_>>>()?,
+                                            exact: exact.clone(),
+                                        }
+                                    }
+                                })
+                            }
+
+                            let MatchExpression { expression, cases } = &**m;
+                            let expr = visit_expr(b, ctx, v, expression)?;
+                            let cases = cases.iter().map(|x| {
+                                let mut params = BTreeMap::new();
+                                let pattern = visit_pattern(&expr.typ(), &x.pattern, ctx, &mut params)?;
+                                let guard = if let Some(ref e) = x.guard {
+                                    Some(visit_block_with_variables(
+                                        b,
+                                        ctx,
+                                        v,
+                                        &BlockExpression { expressions: vec![], remainder: Some(e.clone()) },
+                                        &params,
+                                    )?)
+                                } else {
+                                    None
+                                };
+                                let body = if let Expression::Block(ref b) = *x.body {
+                                    Cow::Borrowed(b.as_ref())
+                                } else {
+                                    Cow::Owned(BlockExpression {
+                                        expressions: vec![],
+                                        remainder: Some(x.body.clone()),
+                                    })
+                                };
+                                let body = visit_block_with_variables(
+                                    b,
+                                    ctx,
+                                    v,
+                                    body.as_ref(),
+                                    &params,
+                                )?;
+                                // let body = Body::new_with_dyn_params(
+                                //     params
+                                //         .values()
+                                //         .cloned()
+                                //         .collect::<Vec<_>>()
+                                //         .as_slice(),
+                                //     |b, v| {
+                                //         let params: BTreeMap<String, ValueRef> = params
+                                //             .iter()
+                                //             .enumerate()
+                                //             .map(|(i, (n, _))| Ok((
+                                //                 n.to_string(),
+                                //                 b.label(v[i].clone(), n.to_string())?
+                                //             )))
+                                //             .collect::<Result<BTreeMap<_, _>>>()?;
+                                //
+                                //         expression_to_body(ctx, &*body, &params, b, v)
+                                //     },
+                                // )?;
+                                Ok(MatchCaseOpN {
+                                    pattern,
+                                    body,
+                                    guard,
+                                })
+                            }).collect::<Result<Vec<_>>>()?;
+                            b.match_(expr, cases)?
+                        }
+                    })
+                }
+
+                fn visit_block_inner(b: &mut BlockBuilderN, ctx: &impl LoaderContext, v: &dyn Scope, e: &BlockExpression) -> Result<TerminatorOpN> {
+                    for e in &e.expressions {
+                        visit_expr(b, ctx, v, e)?;
+                    }
+                    let remainder = if let Some(e) = &e.remainder {
+                        visit_expr(b, ctx, v, e)?
+                    } else {
+                        b.const_unit()?
+                    };
+
+                    Ok(b.yield_expr(remainder)?)
+                }
+
+                fn visit_block(b: &mut BlockBuilderN, ctx: &impl LoaderContext, v: &dyn Scope, e: &BlockExpression) -> Result<BodyN> {
+                    b.body([], |bb, _| {
+                        let terminator_op = visit_block_inner(bb, ctx, v, e)?;
+
+                        Ok(terminator_op)
+                    })
+                }
+
+                fn visit_block_with_variables(
+                    b: &mut BlockBuilderN,
+                    ctx: &impl LoaderContext,
+                    v: &dyn Scope,
+                    e: &BlockExpression,
+                    vars: &BTreeMap<&str, (usize, ValueKind)>,
+                ) -> Result<BodyN> {
+                    let params = vars
+                        .values()
+                        .map(|(_, v)| v)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    b.body(params, |bb, args| {
+                        let vars = vars
+                            .iter()
+                            .map(|(name, (i, _))| bb
+                                .label(args[*i].clone(), *name)
+                                .map(|v| (*name, v)))
+                            .collect::<Result<BTreeMap<_, _>>>()?;
+
+                        let ns = MatchCaseScope(v, &vars);
+
+                        let terminator_op = visit_block_inner(bb, ctx, &ns, e)?;
+
+                        Ok(terminator_op)
+                    })
+                    // b.derive_with_params(params.as_slice(), |b, params| {
+                    //     let vars = vars
+                    //         .iter()
+                    //         .map(|(name, (i, _))| b
+                    //             .label(params[*i].clone(), *name)
+                    //             .map(|v| (*name, v)))
+                    //         .collect::<Result<BTreeMap<_, _>>>()?;
+                    //     let bs = BlockScope(v, RefCell::new(Default::default()));
+                    //     let ns = MatchCaseScope(&bs, &vars);
+                    //
+                    //     let terminator_op = visit_block_inner(b, ctx, &ns, e)?;
+                    //
+                    //     Ok((
+                    //         bs.1.take()
+                    //             .keys()
+                    //             .cloned()
+                    //             .collect(),
+                    //         terminator_op
+                    //     ))
+                    // })
+                }
+
+                visit_block_inner(b, ctx, &params, self)
+            },
+        )?)
+    }
 }
 
 impl<'a> SymbolLoader for FunctionPrototype<'a> {
@@ -697,6 +1053,7 @@ impl<'a> SymbolLoader for FunctionPrototype<'a> {
                 .map(|t| load_type(ctx, t))
                 .unwrap_or(Ok(TypeRef::Primitive(PrimitiveType::Unit)))?,
             body: None,
+            bodyN: None,
         })
     }
 }
@@ -806,6 +1163,7 @@ pub struct FunctionDef {
     params: Vec<Parameter>,
     ret_type: TypeRef,
     body: Option<Body>,
+    bodyN: Option<BodyN>,
 }
 
 impl FunctionDef {
@@ -831,6 +1189,10 @@ impl FunctionDef {
 
     pub fn body(&self) -> Option<&Body> {
         self.body.as_ref()
+    }
+
+    pub fn body_n(&self) -> Option<&BodyN> {
+        self.bodyN.as_ref()
     }
 }
 
@@ -1100,9 +1462,10 @@ impl<'a> ModuleBuilder<'a> {
         }
         for (id, body) in self.bodies {
             let Symbol::Function(ref f) = self.module.symbols[id as usize] else { return Err("only function can have bodies!")?; };
-            let body = body.to_fn_body(f.params(), &self.module)?;
+            // let body = body.to_fn_body(f.params(), &self.module)?;
+            let bodyN = body.to_fn_body0(f.params(), &self.module)?;
             let Symbol::Function(ref mut f) = self.module.symbols[id as usize] else { return Err("only function can have bodies!")?; };
-            f.body = Some(body)
+            f.bodyN = Some(bodyN)
         }
         Ok(self.module)
     }

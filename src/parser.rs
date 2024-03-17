@@ -81,26 +81,26 @@ impl FromKeywordList for Mutability {
     }
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub struct BlockExpression<'a> {
     pub expressions: Vec<Expression<'a>>,
     pub remainder: Option<Rc<Expression<'a>>>,
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub struct MatchExpression<'a> {
     pub expression: Rc<Expression<'a>>,
     pub cases: Vec<MatchCase<'a>>,
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub struct MatchCase<'a> {
     pub pattern: Rc<MatchPattern<'a>>,
     pub body: Rc<Expression<'a>>,
     pub guard: Option<Rc<Expression<'a>>>,
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub struct Qualifier<'a> {
     // Path { container: Identifier<'a>, left: Rc<Qualifier<'a>> },
     // Type(Identifier<'a>),
@@ -108,7 +108,7 @@ pub struct Qualifier<'a> {
     pub segment: Identifier<'a>,
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub enum MatchPattern<'a> {
     Unit,
     Wildcard,

@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use core::cmp::Ordering;
 use core::fmt::{Debug, Formatter};
 
+use crate::mlir::ops::{BlockBuilder, Body as Body0, RuntimeValue, Typed};
 use crate::parser::parse_function_declaration;
 use crate::types::{Module, ModuleBuilder, ResolverContext, StructFields, Symbol, SymbolRef, SymbolType};
 
@@ -21,6 +22,7 @@ pub struct AnyValueRef<T> {
 }
 
 pub type ValueRef = Rc<AnyValueRef<ValueKind>>;
+pub type ValueRefN = RuntimeValue<ValueKind>;
 
 impl<T> AnyValueRef<T> {
     pub fn id(&self) -> usize {
@@ -75,6 +77,49 @@ pub enum ValueKind {
     F64,
     Usize,
     Type(SymbolRef),
+}
+
+impl Typed for OpN {
+    type ValueType = ValueKind;
+
+    fn typ(&self) -> Self::ValueType {
+        fn bin_op_typ<T: Typed<ValueType=ValueKind>>(l: &T, r: &T) -> ValueKind {
+            let l = l.typ();
+            let r = r.typ();
+            if l == r {
+                l
+            } else {
+                ValueKind::Never
+            }
+        }
+
+        match self {
+            OpN::Label(v, _) => v.typ(),
+            OpN::ConstUnit => ValueKind::Unit,
+            OpN::ConstI64(_) => ValueKind::I64,
+            OpN::Block(b) => b.typ(),
+            OpN::Neg(v) => v.typ(),
+            OpN::Add(l, r) => bin_op_typ(l, r),
+            OpN::Mul(l, r) => bin_op_typ(l, r),
+            OpN::Gt(_, _) => ValueKind::Bool,
+            OpN::If(_, t, f) => bin_op_typ(t, f),
+            OpN::Call(_, rt, _) => rt.clone(),
+            OpN::Create(t, _) => ValueKind::Type(t.clone()),
+            OpN::Match(_, p) => p.get(0)
+                .map(|c| c.body.typ())
+                .unwrap_or(ValueKind::Never)
+        }
+    }
+}
+
+impl Typed for TerminatorOpN {
+    type ValueType = ValueKind;
+
+    fn typ(&self) -> Self::ValueType {
+        match self {
+            TerminatorOpN::Yield(v) => v.typ()
+        }
+    }
 }
 
 impl ValueKind {
@@ -134,6 +179,13 @@ pub struct MatchCaseOp {
 }
 
 #[derive(Debug, Eq, PartialEq)]
+pub struct MatchCaseOpN {
+    pub pattern: MatchPatternOp,
+    pub body: BodyN,
+    pub guard: Option<BodyN>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
 pub enum MatchPatternOp {
     Unit,
     Wildcard,
@@ -179,6 +231,27 @@ pub enum Op {
 #[derive(Debug, Eq, PartialEq)]
 pub enum TerminatorOp {
     Yield(ValueRef),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum OpN {
+    Label(ValueRefN, String),
+    ConstUnit,
+    ConstI64(i64),
+    Block(BodyN),
+    Neg(ValueRefN),
+    Add(ValueRefN, ValueRefN),
+    Mul(ValueRefN, ValueRefN),
+    Gt(ValueRefN, ValueRefN),
+    If(ValueRefN, BodyN, BodyN),
+    Call(SymbolRef, ValueKind, Box<[ValueRefN]>),
+    Create(SymbolRef, Box<[(String, ValueRefN)]>),
+    Match(ValueRefN, Box<[MatchCaseOpN]>),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum TerminatorOpN {
+    Yield(ValueRefN),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -333,6 +406,8 @@ impl<T, U, V> AnyBody<T, U, V> {
 }
 
 pub type Body = AnyBody<Op, TerminatorOp, ValueKind>;
+pub type BodyN = Body0<ValueKind, OpN, TerminatorOpN>;
+pub type BlockBuilderN<'a> = BlockBuilder<'a, ValueKind, OpN, TerminatorOpN>;
 
 impl Body {
     pub fn label(&mut self, value: ValueRef, label: impl Into<String>) -> Result<ValueRef> {
@@ -435,6 +510,90 @@ impl Body {
     }
 }
 
+impl<'a> BlockBuilderN<'a> {
+    pub fn label(&mut self, value: ValueRefN, label: impl Into<String>) -> Result<ValueRefN> {
+        Ok(self.op(OpN::Label(value, label.into())))
+    }
+
+    pub fn const_unit(&mut self) -> Result<ValueRefN> {
+        Ok(self.op(OpN::ConstUnit))
+    }
+
+    pub fn const_i64(&mut self, value: i64) -> Result<ValueRefN> {
+        Ok(self.op(OpN::ConstI64(value)))
+    }
+
+    pub fn neg(&mut self, value: ValueRefN) -> Result<ValueRefN> {
+        if !value.typ().is_number() {
+            Err(format!("arithmetic operation requires a numeric operand; got {:?}", value.typ()))?;
+        }
+
+        Ok(self.op(OpN::Neg(value)))
+    }
+
+    pub fn add(&mut self, left: ValueRefN, right: ValueRefN) -> Result<ValueRefN> {
+        if !(left.typ().is_number() && right.typ().is_number()) {
+            Err(format!("arithmetic operation requires a numeric operand; got {:?} and {:?}", left.typ(), right.typ()))?;
+        }
+
+        Ok(self.op(OpN::Add(left, right)))
+    }
+
+    pub fn mul(&mut self, left: ValueRefN, right: ValueRefN) -> Result<ValueRefN> {
+        if !(left.typ().is_number() && right.typ().is_number()) {
+            Err(format!("arithmetic operation requires numeric operands; got {:?} and {:?}", left.typ(), right.typ()))?;
+        }
+
+        Ok(self.op(OpN::Mul(left, right)))
+    }
+
+    pub fn yield_expr(&mut self, value: ValueRefN) -> Result<TerminatorOpN> {
+        Ok(TerminatorOpN::Yield(value))
+    }
+
+    pub fn gt(&mut self, left: ValueRefN, right: ValueRefN) -> Result<ValueRefN> {
+        if !(left.typ().is_number() && right.typ().is_number()) {
+            Err(format!("arithmetic operation requires a numeric operand; got {:?} and {:?}", left.typ(), right.typ()))?;
+        }
+
+        Ok(self.op(OpN::Gt(left, right)))
+    }
+
+    pub fn block_op(&mut self, block: BodyN) -> Result<ValueRefN> {
+        Ok(self.op(OpN::Block(block)))
+    }
+
+    pub fn if_expr(
+        &mut self,
+        cond: ValueRefN,
+        on_true: BodyN,
+        on_false: BodyN,
+    ) -> Result<ValueRefN> {
+        if !matches!(cond.typ(), ValueKind::Bool) {
+            Err(format!("conditional expression requires a boolean operand; got {:?}", cond.typ()))?;
+        }
+
+        if on_true.typ() != on_false.typ() {
+            Err("conditional branches don't return the same type")?;
+        }
+
+        Ok(self.op(OpN::If(cond, on_true, on_false)))
+    }
+
+    pub fn call(&mut self, func: SymbolRef, ret_type: ValueKind, args: impl Into<Box<[ValueRefN]>>) -> Result<ValueRefN> {
+        Ok(self.op(OpN::Call(func, ret_type, args.into())))
+    }
+
+    pub fn create(&mut self, struct_ref: SymbolRef, fields: impl Into<Box<[(String, ValueRefN)]>>) -> Result<ValueRefN> {
+        Ok(self.op(OpN::Create(struct_ref, fields.into())))
+    }
+
+    pub fn match_(&mut self, expr: ValueRefN, cases: impl Into<Box<[MatchCaseOpN]>>) -> Result<ValueRefN> {
+        let cases = cases.into();
+        Ok(self.op(OpN::Match(expr, cases)))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum Composed {
     Struct(Vec<Value>),
@@ -499,19 +658,52 @@ impl Value {
 }
 
 #[derive(Debug)]
-struct Heap<'a>(&'a [Value], Vec<Value>);
+struct Heap<'a> {
+    depth: usize,
+    parent: Option<&'a Heap<'a>>,
+    params: &'a [Value],
+    locals: Vec<Value>,
+}
 
 impl<'a> Heap<'a> {
+    pub fn root(params: &'a [Value]) -> Self {
+        Self {
+            depth: 0,
+            parent: None,
+            params,
+            locals: vec![],
+        }
+    }
+
+    pub fn nested<'b>(&'b self, params: &'a [Value]) -> Heap<'b> where 'b: 'a {
+        Self {
+            depth: self.depth + 1,
+            parent: Some(self),
+            params,
+            locals: vec![],
+        }
+    }
+
     pub fn get(&self, r: &ValueRef) -> Option<Value> {
         if r.param {
-            self.0.get(r.id).cloned()
+            self.params.get(r.id).cloned()
         } else {
-            self.1.get(r.id).cloned()
+            self.locals.get(r.id).cloned()
+        }
+    }
+
+    pub fn get_n(&self, r: &ValueRefN) -> Option<Value> {
+        match r {
+            ValueRefN::Parameter(bd, _, pi, _) if *bd == self.depth => self.params.get(*pi).cloned(),
+            ValueRefN::Local(bd, _, oi, _) if *bd == self.depth => self.locals.get(*oi).cloned(),
+            r => self.parent
+                .and_then(|p| p.get_n(r))
+                // .or_else(|| panic!("NOT FOUND: {r:#?}"))
         }
     }
 
     pub fn push(&mut self, v: Value) {
-        self.1.push(v)
+        self.locals.push(v)
     }
 }
 
@@ -526,7 +718,7 @@ fn eval(ctx: &impl ResolverContext, body: &Body, params: &[Value]) -> Result<Val
             Err(format!("arguments not assignable to parameters types: {actual:?} vs {expected:?}"))?;
         }
     }
-    let mut heap = Heap(params, Vec::default());
+    let mut heap = Heap::root(params);
     for op in &body.ops {
         heap.push(match op {
             Op::ConstUnit => Value::Unit,
@@ -582,7 +774,7 @@ fn eval(ctx: &impl ResolverContext, body: &Body, params: &[Value]) -> Result<Val
                     eval(ctx, body, params.as_slice())?
                 } else {
                     let n = f.name();
-                    return Err(format!("function {n} doesn't have a body"))?
+                    return Err(format!("function {n} doesn't have a body"))?;
                 }
             }
             Op::Create(sr, fs) => {
@@ -689,7 +881,7 @@ fn eval(ctx: &impl ResolverContext, body: &Body, params: &[Value]) -> Result<Val
                             };
                             for (field, pattern) in params {
                                 let Some(id) = fields_by_name.get(field.as_str()) else { return Err(format!("Field {field} does not exist on struct {name}"))?; };
-                                let Some(value) = values.get(*id) else { return Err(format!("invalid ref in struct match pattern: {name}.{field}"))? };
+                                let Some(value) = values.get(*id) else { return Err(format!("invalid ref in struct match pattern: {name}.{field}"))?; };
                                 if !eval_pattern(value, pattern, ctx, heap, vars)? {
                                     return Ok(false);
                                 }
@@ -743,6 +935,227 @@ fn eval(ctx: &impl ResolverContext, body: &Body, params: &[Value]) -> Result<Val
     if let Some(op) = &body.terminator_op {
         match op {
             TerminatorOp::Yield(ref v) => return heap.get(v).ok_or("invalid ref in Yield terminator op".into())
+        }
+    }
+    Err("missing Return op")?
+}
+
+fn eval_n(ctx: &impl ResolverContext, body: &BodyN, params_or_heap: core::result::Result<&[Value], Heap>) -> Result<Value> {
+    let mut heap = match params_or_heap {
+        Err(heap) => heap,
+        Ok(params) => {
+            if body.params().len() != params.len() {
+                Err(format!("invalid number of parameters: expected {} but got {}", body.params().len(), params.len()))?;
+            }
+            for (i, p) in params.iter().enumerate() {
+                let expected = &body.params()[i];
+                if !p.is_assignable_to(expected) {
+                    let actual = p.kind();
+                    Err(format!("arguments not assignable to parameters types: {actual:?} vs {expected:?}"))?;
+                }
+            }
+
+            Heap::root(params)
+        }
+    };
+    for op in body.ops() {
+        heap.push(match op {
+            OpN::ConstUnit => Value::Unit,
+            OpN::ConstI64(v) => Value::I64(*v),
+            OpN::Label(v, _) => heap.get_n(v).ok_or("invalid ref in Label op")?.clone(),
+            OpN::Neg(v) => {
+                let v = heap.get_n(v).ok_or("invalid ref in Neg op")?.to_i16()?;
+                Value::I64(-v)
+            }
+            OpN::Add(l, r) => {
+                let l = heap.get_n(l).ok_or("invalid ref in Add op")?.to_i16()?;
+                let r = heap.get_n(r).ok_or("invalid ref in Add op")?.to_i16()?;
+                Value::I64(l + r)
+            }
+            OpN::Mul(l, r) => {
+                let l = heap.get_n(l).ok_or("invalid ref in Mul op")?.to_i16()?;
+                let r = heap.get_n(r).ok_or("invalid ref in Mul op")?.to_i16()?;
+                Value::I64(l * r)
+            }
+
+            OpN::Gt(l, r) => {
+                let l = heap.get_n(l).ok_or("invalid ref in Gt op")?.to_i16()?;
+                let r = heap.get_n(r).ok_or("invalid ref in Gt op")?.to_i16()?;
+                Value::Bool(l > r)
+            }
+            OpN::Block(body) => {
+                eval_n(ctx, body, Err(heap.nested(&[])))?
+            }
+            OpN::If(c, t, f) => {
+                let c = heap.get_n(c).ok_or("invalid ref in If op")?.to_bool()?;
+                let b = if c { t } else { f };
+                eval_n(ctx, b, Err(heap.nested(&[])))?
+            }
+            OpN::Call(f, _, a) => {
+                let f = ctx.get_symbol(&f).or(Err("function symbol not found"))?;
+
+                let Symbol::Function(f) = f else { return Err("symbol not a function")?; };
+
+                let params = a
+                    .iter()
+                    .map(|v| heap.get_n(v).ok_or("invalid ref in Call op".into()))
+                    .collect::<Result<Vec<_>>>()?;
+
+                if let Some(body) = f.body_n() {
+                    eval_n(ctx, body, Ok(params.as_slice()))?
+                } else {
+                    let n = f.name();
+                    return Err(format!("function {n} doesn't have a body"))?;
+                }
+            }
+            OpN::Create(sr, fs) => {
+                let s = ctx.get_symbol(&sr).or(Err("struct symbol not found"))?;
+
+                let Symbol::Struct(s) = s else { return Err("symbol not a struct")?; };
+
+                let mut fields = match s.fields() {
+                    StructFields::Named(n) => Ok(n),
+                    StructFields::Tuple(_) => Err("tuple structs cannot be constructed as a named struct"),
+                    StructFields::Unit => Err("unit structs cannot be constructed as a named struct")
+                }?;
+
+                let mut missing_fields = vec![];
+
+                let mut initializers = fs.iter()
+                    .cloned()
+                    .collect::<BTreeMap<_, _>>();
+
+                let mut values: Vec<Value> = Vec::with_capacity(fields.len());
+
+                for f in fields {
+                    let value = match initializers.remove(f.name()) {
+                        Some(value) => heap
+                            .get_n(&value)
+                            .ok_or_else(|| format!("invalid ref in field initializer '{}' for struct '{}'", f.name(), s.name()))?,
+                        None => {
+                            missing_fields.push(f.name());
+                            continue;
+                        }
+                    };
+                    values.push(value);
+                }
+
+                if !initializers.is_empty() {
+                    return Err(format!("fields '{}' don't exist on struct '{}'", initializers.keys().map(AsRef::as_ref).collect::<Vec<_>>().join("', '"), s.name()).into());
+                }
+                if !missing_fields.is_empty() {
+                    missing_fields.reverse();
+                    return Err(format!("missing fields '{}' while creating a '{}'", missing_fields.join("', '"), s.name()).into());
+                }
+
+                Value::Composed(Composed::Struct(values), sr.clone())
+            }
+            OpN::Match(expr, cases) => {
+                fn eval_pattern(
+                    value: &Value,
+                    pattern: &MatchPatternOp,
+                    ctx: &impl ResolverContext,
+                    heap: &Heap,
+                    vars: &mut Vec<Value>,
+                ) -> Result<bool> {
+                    Ok(match pattern {
+                        MatchPatternOp::Unit => matches!(value.kind(), ValueKind::Unit),
+                        MatchPatternOp::Wildcard => true,
+                        MatchPatternOp::Union(p) => {
+                            for p in p {
+                                if eval_pattern(value, p, ctx, heap, vars)? {
+                                    return Ok(true);
+                                }
+                            }
+                            false
+                        }
+                        MatchPatternOp::Variable(id) => {
+                            if *id >= vars.len() {
+                                vars.resize(id + 1, Value::Never)
+                            }
+                            vars[*id] = value.clone();
+                            true
+                        }
+                        MatchPatternOp::NumberLiteral(n) => match value {
+                            Value::I64(actual) => *n == *actual,
+                            Value::I16(actual) => *n == *actual as i64,
+                            Value::F64(actual) => *n == *actual as i64,
+                            _ => false
+                        },
+                        MatchPatternOp::StringLiteral(_) => false,
+                        MatchPatternOp::IsTypeOrEnum(_) => false,
+                        MatchPatternOp::TupleStruct { .. } => false,
+                        MatchPatternOp::FieldStruct { typ, params, exact } => {
+                            let s = match typ {
+                                SymbolRefOrEnum::Type(s) => ctx.get_symbol(s)?,
+                                SymbolRefOrEnum::Enum(_, _) => return Ok(false)
+                            };
+                            let name = s.name();
+                            let s = match s {
+                                Symbol::Struct(s) => s.fields(),
+                                _ => return Ok(false)
+                            };
+                            let s = match s {
+                                StructFields::Named(s) => s,
+                                _ => return Ok(false)
+                            };
+                            let fields_by_name = s.iter()
+                                .enumerate()
+                                .map(|(i, f)| (f.name(), i))
+                                .collect::<BTreeMap<_, _>>();
+                            let s = match value {
+                                Value::Composed(s, _) => s,
+                                _ => return Ok(false)
+                            };
+                            let values = match s {
+                                Composed::Struct(s) => s
+                            };
+                            for (field, pattern) in params {
+                                let Some(id) = fields_by_name.get(field.as_str()) else { return Err(format!("Field {field} does not exist on struct {name}"))?; };
+                                let Some(value) = values.get(*id) else { return Err(format!("invalid ref in struct match pattern: {name}.{field}"))?; };
+                                if !eval_pattern(value, pattern, ctx, heap, vars)? {
+                                    return Ok(false);
+                                }
+                            }
+                            true
+                            // match typ {
+                            //     SymbolRefOrEnum::Enum(e, v) => {
+                            //         let e = ctx.get_symbol(e)?;
+                            //         match e {
+                            //             Symbol::Enum(EnumDef { variants, .. }) => {
+                            //                 match value {
+                            //                     Value::Composed(e, _) => match e {
+                            //                         Composed::Struct(s) => s.
+                            //                     }
+                            //                     _ => false
+                            //                 }
+                            //             }
+                            //             _ => false
+                            //         }
+                            //     }
+                            //     _ => false,
+                            // }
+                        }
+                    })
+                }
+
+                let mut vars = vec![];
+                for x in cases.as_ref().iter() {
+                    let value = heap
+                        .get_n(expr)
+                        .ok_or_else(|| format!("invalid ref in match pattern"))?;
+                    if eval_pattern(&value, &x.pattern, ctx, &heap, &mut vars)? {
+                        return eval_n(ctx, &x.body, Err(heap.nested(vars.as_slice())));
+                    }
+                }
+
+                Value::Never
+            }
+        });
+    }
+    if let op = &body.terminator_op() {
+        match op {
+            TerminatorOpN::Yield(ref v) => return heap.get_n(v).ok_or("invalid ref in Yield terminator op".into())
         }
     }
     Err("missing Return op")?
@@ -809,8 +1222,8 @@ pub fn life(mut a: i64) -> i64 {
         .build()?;
 
     let res = if let Some(Symbol::Function(f)) = module.get_by_name("life") {
-        let Some(body) = f.body() else { return Err("missing body")? };
-        eval(&module, body, &[Value::I64(41)])?
+        let Some(body) = f.body_n() else { return Err("missing body")?; };
+        eval_n(&module, body, Ok(&[Value::I64(41)]))?
     } else {
         Value::Unit
     };
@@ -842,11 +1255,12 @@ pub fn fib(n: i64) -> i64 {
         .build()?;
 
     if let Some(Symbol::Function(f)) = module.get_by_name("fib") {
-        let Some(body) = f.body() else { return Err("missing body")? };
+        let Some(body) = f.body_n() else { return Err("missing body")?; };
+        // assert_eq!("", format!("{:#?}", body));
         assert_eq!([
-                       eval(&module, body, &[Value::I64(26)])?
+                       eval_n(&module, body, Ok(&[Value::I64(10)]))?
                    ], [
-                       Value::I64(121393)
+                       Value::I64(55)
                    ]);
     }
 
@@ -905,7 +1319,7 @@ pub fn maybe_get_x(maybe_point: Some) -> i64 {
     let body = get_function_body(&module, "new_point")?;
     assert_eq!(
         [
-            eval(&module, body, &[Value::I64(0), Value::I64(1)])?,
+            eval_n(&module, body, Ok(&[Value::I64(0), Value::I64(1)]))?,
         ], [
             Value::Composed(
                 Composed::Struct(vec![Value::I64(0), Value::I64(0)]),
@@ -917,10 +1331,10 @@ pub fn maybe_get_x(maybe_point: Some) -> i64 {
     let body = get_function_body(&module, "get_x")?;
     assert_eq!(
         [
-            eval(&module, body, &[Value::Composed(
+            eval_n(&module, body, Ok(&[Value::Composed(
                 Composed::Struct(vec![Value::I64(42), Value::I64(1337)]),
                 point_ref,
-            )])?,
+            )]))?,
         ], [
             Value::I64(1379)
         ]
@@ -929,7 +1343,7 @@ pub fn maybe_get_x(maybe_point: Some) -> i64 {
     let body = get_function_body(&module, "sum")?;
     assert_eq!(
         [
-            eval(&module, body, &[Value::I64(42), Value::I64(1338)])?,
+            eval_n(&module, body, Ok(&[Value::I64(42), Value::I64(1338)]))?,
         ], [
             Value::I64(1379)
         ]
@@ -938,10 +1352,10 @@ pub fn maybe_get_x(maybe_point: Some) -> i64 {
     Ok(())
 }
 
-fn get_function_body<'a>(module: &'a Module, name: &str) -> Result<&'a Body> {
+fn get_function_body<'a>(module: &'a Module, name: &str) -> Result<&'a BodyN> {
     let Some(Symbol::Function(f)) = module.get_by_name(name) else {
         return Err(format!("'{name}' is supposed to be a function"))?;
     };
 
-    f.body().ok_or("missing function body".into())
+    f.body_n().ok_or("missing function body".into())
 }

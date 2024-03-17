@@ -8,3 +8,6 @@ mod types;
 mod printer;
 mod bytecode;
 mod transformer;
+mod mlir {
+    pub mod ops;
+}
