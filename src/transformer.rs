@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::fmt::{Display, Formatter};
 use core::ops::Deref;
 
-use crate::bytecode::{AnyBody, AnyValueRef, Body, BodyN, Op, OpN, TerminatorOp, TerminatorOpN, ValueKind};
+use crate::bytecode::{SkBody, SkOp, SkTerminatorOp, SkValueKind};
 use crate::lexer::Token;
 use crate::mlir::ops::{BlockBuilder, Body as Body0, RefId, RuntimeValue, Typed};
 use crate::types::{EnumDef, EnumVariantFields, FunctionDef, Module, PrimitiveType, Scope, StructDef, StructFields, Symbol, SymbolRef, TypeRef, value_kind_to_type_ref};
@@ -22,7 +22,7 @@ trait ToJavaResolver {
         JavaType::from_type_ref(self, typ)
     }
 
-    fn convert_kind(&self, typ: &ValueKind) -> JavaValueKind {
+    fn convert_kind(&self, typ: &SkValueKind) -> JavaValueKind {
         let kind = value_kind_to_type_ref(typ);
         match kind {
             Some(typ) => Self::convert_types(self, &typ).into(),
@@ -261,7 +261,7 @@ struct JavaFunction {
     name: String,
     parameters: Vec<JavaFunctionParameter>,
     ret_type: JavaType,
-    body: JavaBodyN,
+    body: JavaBody,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -294,7 +294,7 @@ impl Display for JavaFunction {
         }
         write!(f, ") {{\n")?;
         if let op = body.terminator_op() {
-            fn get(f: &mut Formatter<'_>, loc: &mut BTreeMap<usize, Rc<String>>, body: &JavaBodyN, v: &JavaValueRefN) -> Result<Rc<String>, core::fmt::Error> {
+            fn get(f: &mut Formatter<'_>, loc: &mut BTreeMap<usize, Rc<String>>, body: &JavaBody, v: &JavaValueRef) -> Result<Rc<String>, core::fmt::Error> {
                 let op = body.op(v).ok_or(core::fmt::Error)?;
                 if !matches!(v.typ(), JavaValueKind::Var(_)) && !matches!(op, JavaOpN::GetParam(_, _) | JavaOpN::ConstLong(_) | JavaOpN::ConstShort(_)) {
                     let id = match v.id() {
@@ -316,7 +316,7 @@ impl Display for JavaFunction {
                 }
             }
 
-            fn print_rec(f: &mut Formatter<'_>, loc: &mut BTreeMap<usize, Rc<String>>, body: &JavaBodyN, op: &JavaOpN, kind: &JavaValueKind) -> Result<Rc<String>, core::fmt::Error> {
+            fn print_rec(f: &mut Formatter<'_>, loc: &mut BTreeMap<usize, Rc<String>>, body: &JavaBody, op: &JavaOpN, kind: &JavaValueKind) -> Result<Rc<String>, core::fmt::Error> {
                 match kind {
                     JavaValueKind::Var(v) => return Ok(Rc::new(v.0.clone())),
                     _ => {}
@@ -567,7 +567,7 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
             module.by_fqdn.insert(fqdn.to_string(), id);
         }
         for (id, def) in &builder.pending_functions {
-            let Some(body) = def.body_n() else { continue; };
+            let Some(body) = def.body() else { continue; };
 
             let ret_type = builder.convert_types(def.ret_type());
 
@@ -611,39 +611,21 @@ impl JavaModule {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum JavaOp {
-    Nop(Rc<JavaValueRef>),
-    Neg(Rc<JavaValueRef>),
-    ConstShort(i16),
-    ConstLong(i64),
-    GetParam(Rc<String>),
-    InvokeStatic(JavaSymbolRef, Rc<String>, Vec<Rc<JavaValueRef>>),
-    Create(JavaSymbolRef, Vec<Rc<JavaValueRef>>),
-    Add(Rc<JavaValueRef>, Rc<JavaValueRef>),
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum JavaTerminatorOp {
-    Return,
-    ReturnValue(Rc<JavaValueRef>),
-}
-
-#[derive(Debug, Eq, PartialEq)]
 enum JavaOpN {
-    Nop(JavaValueRefN),
-    Neg(JavaValueRefN),
+    Nop(JavaValueRef),
+    Neg(JavaValueRef),
     ConstShort(i16),
     ConstLong(i64),
     GetParam(JavaValueKind, Rc<String>),
-    InvokeStatic(JavaSymbolRef, JavaValueKind, Rc<String>, Vec<JavaValueRefN>),
-    Create(JavaSymbolRef, Vec<JavaValueRefN>),
-    Add(JavaValueRefN, JavaValueRefN),
+    InvokeStatic(JavaSymbolRef, JavaValueKind, Rc<String>, Vec<JavaValueRef>),
+    Create(JavaSymbolRef, Vec<JavaValueRef>),
+    Add(JavaValueRef, JavaValueRef),
 }
 
 #[derive(Debug, Eq, PartialEq)]
 enum JavaTerminatorOpN {
     Return,
-    ReturnValue(JavaValueRefN),
+    ReturnValue(JavaValueRef),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -737,112 +719,25 @@ impl From<JavaType> for JavaValueKind {
     }
 }
 
-type JavaValueRef = AnyValueRef<JavaValueKind>;
-type JavaValueRefN = RuntimeValue<JavaValueKind>;
-type JavaBody = AnyBody<JavaOp, JavaTerminatorOp, JavaValueKind>;
+type JavaValueRef = RuntimeValue<JavaValueKind>;
 
-type JavaBodyN = Body0<JavaValueKind, JavaOpN, JavaTerminatorOpN>;
-type JavaBlockBuilderN<'a> = BlockBuilder<'a, ValueKind, JavaOpN, JavaTerminatorOpN>;
+type JavaBody = Body0<JavaValueKind, JavaOpN, JavaTerminatorOpN>;
+type JavaBlockBuilder<'a> = BlockBuilder<'a, SkValueKind, JavaOpN, JavaTerminatorOpN>;
 
-impl<'a> TryFrom<(&'a Body, &'a JavaModuleBuilder<'_>, &'a JavaModule)> for JavaBody {
+impl<'a> TryFrom<(&'a SkBody, &'a JavaModuleBuilder<'_>, &'a JavaModule)> for JavaBody {
     type Error = Cow<'static, str>;
 
-    fn try_from((pb, builder, module): (&'a Body, &'a JavaModuleBuilder, &'a JavaModule)) -> Result<Self, Self::Error> {
-        let params = pb.params
-            .iter()
-            .map(|x| JavaValueKind::Never)
-            .collect::<Vec<_>>();
-        Ok(Self::new_with_dyn_params(params.as_slice(), |b, args| {
-            let mut mapping: BTreeMap<usize, Rc<JavaValueRef>> = BTreeMap::new();
-            let def = b.push(JavaOp::ConstLong(-1), JavaType::Long.into())?;
-            for (id, op) in pb.ops.iter().enumerate() {
-                let (jop, kind) = match op {
-                    Op::Label(v, n) => {
-                        if v.is_param() {
-                            let s = builder.convert_kind(v.kind());
-                            (JavaOp::GetParam(Rc::new(n.clone())), JavaValueKind::Var(Rc::new((n.clone(), s))))
-                        } else {
-                            let Some(v) = mapping.get(&v.id()).cloned() else { continue; };
-                            let k = v.kind().clone();
-                            (JavaOp::Nop(v), k)
-                        }
-                    }
-                    Op::ConstUnit => continue,
-                    Op::ConstI64(n) if *n < i16::MAX as i64 => (JavaOp::ConstShort(n.clone() as i16), JavaType::Short.into()),
-                    Op::ConstI64(n) => (JavaOp::ConstLong(n.clone()), JavaType::Long.into()),
-                    Op::Block(_) => continue,
-                    Op::Neg(v) => {
-                        let Some(v) = mapping.get(&v.id()).cloned() else { continue; };
-                        let k = v.kind().clone();
-                        (JavaOp::Neg(v), k)
-                    }
-                    Op::Add(l, r) => {
-                        let Some(l) = mapping.get(&l.id()).cloned() else { continue; };
-                        let Some(r) = mapping.get(&r.id()).cloned() else { continue; };
-                        let k = r.kind().clone();
-                        (JavaOp::Add(l, r), k)
-                    }
-                    Op::Mul(_, _) => continue,
-                    Op::Gt(_, _) => continue,
-                    Op::If(_, _, _) => continue,
-                    Op::Call(s, a) => {
-                        let id = s.id();
-                        let s = builder.get_fn_container(s).ok_or("function not found")?;
-                        let m = module.resolve(s.1.as_str()).ok_or("container not found")?;
-                        let f = m.methods.get(&id).ok_or("container doesn't contain function")?;
-                        let a = a
-                            .iter()
-                            .map(|v| mapping.get(&v.id())
-                                .cloned()
-                                .unwrap_or_else(|| def.clone()))
-                            .collect();
-                        (JavaOp::InvokeStatic(s, Rc::new(f.name.clone()), a), f.ret_type.clone().into())
-                    }
-                    Op::Create(s, p) => {
-                        let p = p.iter().map(|(n, v)| (n, v)).collect::<BTreeMap<_, _>>();
-                        let s = builder.convert_refs(s);
-                        let m = module.resolve(s.1.as_str()).ok_or("symbol not found")?;
-                        let m = match m.kind {
-                            JavaSymbolKind::Record(ref m) => m,
-                            _ => return Err("only Records can be constructed")?
-                        };
-                        let mut params = vec![];
-                        for f in &m.fields {
-                            let Some(v) = p.get(&f.name) else { return Err("missing parameter")?; };
-                            let v = mapping.get(&v.id()).cloned().unwrap_or_else(|| def.clone());
-                            params.push(v);
-                        }
-                        (JavaOp::Create(s.clone(), params), JavaType::Class(s).into())
-                    }
-                    Op::Match(_, _) => continue,
-                };
-                let r = b.push(jop, kind)?;
-                mapping.insert(id, r);
-            }
-            if let Some(TerminatorOp::Yield(ref v)) = pb.terminator_op {
-                if let Some(v) = mapping.get(&v.id()).cloned() {
-                    return Ok(JavaTerminatorOp::ReturnValue(v));
-                }
-            };
-            Ok(JavaTerminatorOp::Return)
-        })?)
-    }
-}
-
-impl<'a> TryFrom<(&'a BodyN, &'a JavaModuleBuilder<'_>, &'a JavaModule)> for JavaBodyN {
-    type Error = Cow<'static, str>;
-
-    fn try_from((pb, builder, module): (&'a BodyN, &'a JavaModuleBuilder, &'a JavaModule)) -> Result<Self, Self::Error> {
+    fn try_from((pb, builder, module): (&'a SkBody, &'a JavaModuleBuilder, &'a JavaModule)) -> Result<Self, Self::Error> {
         let params = pb.params()
             .iter()
             .map(|x| JavaValueKind::Never) // TODO
             .collect::<Vec<_>>();
         Ok(Self::isolated(params.as_slice(), |b, args| {
-            let mut mapping: BTreeMap<usize, JavaValueRefN> = BTreeMap::new();
+            let mut mapping: BTreeMap<usize, JavaValueRef> = BTreeMap::new();
             let def = b.op(JavaOpN::ConstLong(-1));
             for (id, op) in pb.ops().iter().enumerate() {
                 let jop = match op {
-                    OpN::Label(v, n) => {
+                    SkOp::Label(v, n) => {
                         match v.id() {
                             RefId::Param(_) => {
                                 let s = builder.convert_kind(&v.typ());
@@ -854,18 +749,18 @@ impl<'a> TryFrom<(&'a BodyN, &'a JavaModuleBuilder<'_>, &'a JavaModule)> for Jav
                             }
                         }
                     }
-                    OpN::ConstUnit => continue,
-                    OpN::ConstI64(n) if *n < i16::MAX as i64 => JavaOpN::ConstShort(n.clone() as i16),
-                    OpN::ConstI64(n) => JavaOpN::ConstLong(n.clone()),
-                    OpN::Block(_) => continue, // TODO
-                    OpN::Neg(v) => {
+                    SkOp::ConstUnit => continue,
+                    SkOp::ConstI64(n) if *n < i16::MAX as i64 => JavaOpN::ConstShort(n.clone() as i16),
+                    SkOp::ConstI64(n) => JavaOpN::ConstLong(n.clone()),
+                    SkOp::Block(_) => continue, // TODO
+                    SkOp::Neg(v) => {
                         let Some(v) = mapping.get(&match v.id() {
                             RefId::Param(_) => continue,
                             RefId::Op(oi) => oi
                         }).cloned() else { return Err("MISSING VALUE")?; }; // FIXME
                         JavaOpN::Neg(v)
                     }
-                    OpN::Add(l, r) => {
+                    SkOp::Add(l, r) => {
                         let Some(l) = mapping.get(&match l.id() {
                             RefId::Param(_) => continue,
                             RefId::Op(oi) => oi
@@ -876,31 +771,35 @@ impl<'a> TryFrom<(&'a BodyN, &'a JavaModuleBuilder<'_>, &'a JavaModule)> for Jav
                         }).cloned() else { return Err("MISSING VALUE")?; }; // FIXME
                         JavaOpN::Add(l, r)
                     }
-                    OpN::Mul(_, _) => continue, // TODO
-                    OpN::Gt(_, _) => continue, // TODO
-                    OpN::If(_, _, _) => continue, // TODO
-                    OpN::Call(s, _, a) => {
+                    SkOp::Mul(_, _) => continue, // TODO
+                    SkOp::Gt(_, _) => continue, // TODO
+                    SkOp::If(_, _, _) => continue, // TODO
+                    SkOp::Call(s, _, a) => {
                         let id = s.id();
-                        let s = builder.get_fn_container(s).ok_or("function not found")?;
-                        let m = module.resolve(s.1.as_str()).ok_or("container not found")?;
-                        let f = m.methods.get(&id).ok_or("container doesn't contain function")?;
-                        let a = a
-                            .iter()
-                            .map(|v| match v.id() {
-                                RefId::Param(_) => None,
-                                RefId::Op(oi) => Some(oi)
-                            }.and_then(|oi| mapping.get(&oi))
-                                .cloned()
-                                .unwrap_or_else(|| def.clone()))
-                            .collect();
-                        JavaOpN::InvokeStatic(
-                            s,
-                            f.ret_type.clone().into(),
-                            Rc::new(f.name.clone()),
-                            a,
-                        )
+                        match builder.get_fn_container(s) {
+                            None => Err(format!("Java function #{s} not found"))?, // TODO inline function
+                            Some(s) => {
+                                let m = module.resolve(s.1.as_str()).ok_or("container not found")?;
+                                let f = m.methods.get(&id).ok_or("container doesn't contain function")?;
+                                let a = a
+                                    .iter()
+                                    .map(|v| match v.id() {
+                                        RefId::Param(_) => None,
+                                        RefId::Op(oi) => Some(oi)
+                                    }.and_then(|oi| mapping.get(&oi))
+                                        .cloned()
+                                        .unwrap_or_else(|| def.clone()))
+                                    .collect();
+                                JavaOpN::InvokeStatic(
+                                    s,
+                                    f.ret_type.clone().into(),
+                                    Rc::new(f.name.clone()),
+                                    a,
+                                )
+                            }
+                        }
                     }
-                    OpN::Create(s, p) => {
+                    SkOp::Create(s, p) => {
                         let p = p.iter().map(|(n, v)| (n, v)).collect::<BTreeMap<_, _>>();
                         let s = builder.convert_refs(s);
                         let m = module.resolve(s.1.as_str()).ok_or("symbol not found")?;
@@ -919,12 +818,12 @@ impl<'a> TryFrom<(&'a BodyN, &'a JavaModuleBuilder<'_>, &'a JavaModule)> for Jav
                         }
                         JavaOpN::Create(s.clone(), params)
                     }
-                    OpN::Match(_, _) => continue, // TODO
+                    SkOp::Match(_, _) => continue, // TODO
                 };
                 let r = b.op(jop);
                 mapping.insert(id, r);
             }
-            if let TerminatorOpN::Yield(ref v) = pb.terminator_op() {
+            if let SkTerminatorOp::Yield(ref v) = pb.terminator_op() {
                 if let Some(v) = match v.id() {
                     RefId::Param(_) => None,
                     RefId::Op(oi) => Some(oi)
@@ -954,7 +853,7 @@ fn new_rect(x: i16, y: i16, w: i16, h: i16) -> Rectangle {
   Rectangle {
     origin: new_point(x, y),
     size: Size {
-      width: w,
+      width: w, // TODO allow call to times2
       height: h,
     },
   }

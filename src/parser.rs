@@ -278,7 +278,7 @@ fn parse_optional_group_with_dotdot<'a, T, F: Fn(&mut Vec<Token<'a>>) -> Result<
     parse: F,
     open: TokenKind,
     close: TokenKind,
-) -> Result<(Option<(Vec<T>, bool)>)> {
+) -> Result<Option<(Vec<T>, bool)>> {
     if !eat_token(tokens, open).is_some() {
         return Ok(None);
     }
@@ -555,7 +555,7 @@ pub fn parse_match_pattern_without_union<'a>(tokens: &mut Vec<Token<'a>>) -> Res
 }
 
 pub fn parse_match_pattern<'a>(tokens: &mut Vec<Token<'a>>) -> Result<MatchPattern<'a>> {
-    let mut prev = parse_match_pattern_without_union(tokens)?;
+    let prev = parse_match_pattern_without_union(tokens)?;
     if eat_token(tokens, Pipe).is_none() {
         return Ok(prev);
     }

@@ -129,10 +129,12 @@ impl<'a> Token<'a> {
             .unwrap_or(left.len())
     }
 
+    #[inline(always)]
     fn punct(kind: TokenKind) -> (usize, Option<TokenKind>) {
         (1, Some(kind))
     }
 
+    #[inline(always)]
     fn double_punct(kind: TokenKind) -> (usize, Option<TokenKind>) {
         (2, Some(kind))
     }
@@ -169,6 +171,7 @@ impl<'a> Token<'a> {
     }
 }
 
+#[cfg(test)]
 fn assert_tokenize(
     input: &str,
     expected: &[(TokenKind<'static>, Range<usize>)],
