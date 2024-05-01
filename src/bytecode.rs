@@ -239,7 +239,7 @@ impl<'a> SkBlockBuilder<'a> {
         }
 
         if on_true.typ() != on_false.typ() {
-            Err("conditional branches don't return the same type")?;
+            Err(format!("conditional branches don't return the same type; got {:?} and {:?}", on_true.typ(), on_false.typ()))?;
         }
 
         Ok(self.op(SkOp::If(cond, on_true, on_false)))
