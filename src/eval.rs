@@ -474,7 +474,9 @@ pub fn maybe_get_x(maybe_point: Some) -> i64 {
 
     let module = Module::parse_tokens("my_first_module", tokens)?;
 
-    let Some(point_ref @ SymbolRef(_, SymbolType::Struct)) = module.get_ref_by_name("Point") else {
+    let Some(point_ref) = module
+        .get_ref_by_name("Point")
+        .filter(|sr| matches!(sr.typ(), SymbolType::Struct)) else {
         return Err("'Point' is supposed to be declared as a struct")?;
     };
 

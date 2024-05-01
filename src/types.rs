@@ -77,12 +77,7 @@ impl From<Visibility> for Scope {
 }
 
 #[derive(Debug, Clone)]
-#[cfg(not(test))]
 pub struct SymbolRef(u32, SymbolType);
-
-#[derive(Debug, Clone)]
-#[cfg(test)]
-pub struct SymbolRef(pub u32, pub SymbolType);
 
 impl Eq for SymbolRef {}
 
