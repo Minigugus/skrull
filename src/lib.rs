@@ -9,6 +9,7 @@ pub mod printer;
 pub mod bytecode;
 pub mod transformer;
 pub mod eval;
+mod scope;
 
 pub mod mlir {
     pub mod ops;

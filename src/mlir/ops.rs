@@ -32,6 +32,7 @@ pub struct Block<VT, OP: Typed<ValueType=VT>, TOP: Typed<ValueType=VT>> {
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct Body<VT, OP: Typed<ValueType=VT>, TOP: Typed<ValueType=VT>> {
+    depth: BodyDepth,
     entry: Block<VT, OP, TOP>,
     others: Vec<Block<VT, OP, TOP>>,
 }
@@ -157,9 +158,21 @@ impl<'a, VT, OP: Typed<ValueType=VT>, TOP: Typed<ValueType=VT>> BlockBuilder<'a,
 impl<VT, OP: Typed<ValueType=VT>, TOP: Typed<ValueType=VT>> Body<VT, OP, TOP> {
     pub fn op(&self, typ: &RuntimeValue<VT>) -> Option<&OP> {
         match *typ {
-            RuntimeValue::Parameter(_, _, _, _) => None,
-            RuntimeValue::Local(_, _, oi, _) => self.entry.ops.get(oi)
+            RuntimeValue::Local(bd, _, oi, _) if bd == self.depth => self.entry.ops.get(oi),
+            _ => None,
         }
+    }
+
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item=(RuntimeValue<VT>, &OP)> {
+        let depth = self.depth;
+        self.entry.ops
+            .iter()
+            .enumerate()
+            .map(move |(oi, op)| (RuntimeValue::Local(depth, 0, oi, op.typ()), op))
     }
 
     pub fn ops(&self) -> &[OP] {
@@ -194,6 +207,7 @@ impl<VT, OP: Typed<ValueType=VT>, TOP: Typed<ValueType=VT>> Body<VT, OP, TOP> {
         };
         let terminator_op = (builder)(&mut bb, parameter_values)?;
         Ok(Body {
+            depth,
             entry: Block {
                 parameters,
                 terminator_op,
