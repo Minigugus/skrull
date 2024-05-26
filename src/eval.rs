@@ -132,6 +132,7 @@ fn eval(ctx: &impl ResolverContext, body: &SkBody, params_or_heap: core::result:
     for op in body.ops() {
         heap.push(match op {
             SkOp::ConstUnit => Value::Unit,
+            SkOp::ConstBool(v) => Value::Bool(*v),
             SkOp::ConstI64(v) => Value::I64(*v),
             SkOp::Label(v, _) => heap.get(v).ok_or("invalid ref in Label op")?.clone(),
             SkOp::Neg(v) => {
@@ -247,6 +248,10 @@ fn eval(ctx: &impl ResolverContext, body: &SkBody, params_or_heap: core::result:
                             vars[*id] = value.clone();
                             true
                         }
+                        SkMatchPatternOp::BooleanLiteral(v) => match value {
+                            Value::Bool(actual) => *v == *actual,
+                            _ => false
+                        },
                         SkMatchPatternOp::NumberLiteral(n) => match value {
                             Value::I64(actual) => *n == *actual,
                             Value::I16(actual) => *n == *actual as i64,

@@ -890,6 +890,7 @@ impl JavaBody {
                 }
             }
             SkOp::ConstUnit => JavaOpN::Error("SkOp::ConstUnit conversion not implemented".into()),
+            SkOp::ConstBool(v) => JavaOpN::Error("SkOp::ConstBool conversion not implemented".into()),
             SkOp::ConstI64(n) if *n < i16::MAX as i64 => JavaOpN::ConstShort(n.clone() as i16),
             SkOp::ConstI64(n) => JavaOpN::ConstLong(n.clone()),
             SkOp::Block(_) => JavaOpN::Error("SkOp::Block conversion not implemented".into()), // TODO

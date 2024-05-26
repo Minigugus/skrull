@@ -231,6 +231,7 @@ impl<'a> SymbolLoader for Struct<'a> {
 
 fn load_type(ctx: &impl LoaderContext, typ: Type) -> Result<TypeRef> {
     Ok(match typ {
+        Type::Bool => TypeRef::Primitive(PrimitiveType::Bool),
         Type::I16 => TypeRef::Primitive(PrimitiveType::I16),
         Type::U32 => TypeRef::Primitive(PrimitiveType::U32),
         Type::I64 => TypeRef::Primitive(PrimitiveType::I64),
@@ -355,6 +356,8 @@ impl<'a> BlockExpression<'a> {
                     Ok(match expr {
                         Expression::Unit => b.const_unit()?,
                         Expression::Literal(v) => b.const_i64(*v)?,
+                        Expression::Identifier(n) if n.0 == "true" => b.const_bool(true)?,
+                        Expression::Identifier(n) if n.0 == "false" => b.const_bool(false)?,
                         Expression::Identifier(n) => v.read_variable(n)?,
                         Expression::Block(e) => {
                             let e = visit_block(b, ctx, v, e)?;
@@ -452,6 +455,8 @@ impl<'a> BlockExpression<'a> {
                                 Ok(match pattern {
                                     MatchPattern::Unit => SkMatchPatternOp::Unit,
                                     MatchPattern::Wildcard => SkMatchPatternOp::Wildcard,
+                                    MatchPattern::Variable(name) if name.0 == "true" => SkMatchPatternOp::BooleanLiteral(true),
+                                    MatchPattern::Variable(name) if name.0 == "false" => SkMatchPatternOp::BooleanLiteral(false),
                                     MatchPattern::Variable(name) => {
                                         let id = vars_by_name.len();
                                         SkMatchPatternOp::Variable(
@@ -897,6 +902,7 @@ pub enum TypeRef {
 }
 
 pub enum PrimitiveType {
+    Bool,
     I16,
     U32,
     I64,
@@ -908,6 +914,7 @@ pub enum PrimitiveType {
 impl Debug for PrimitiveType {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
+            PrimitiveType::Bool => write!(f, "bool"),
             PrimitiveType::I16 => write!(f, "i16"),
             PrimitiveType::U32 => write!(f, "u32"),
             PrimitiveType::I64 => write!(f, "i64"),

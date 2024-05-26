@@ -42,6 +42,7 @@ impl Typed for SkOp {
         match self {
             SkOp::Label(v, _) => v.typ(),
             SkOp::ConstUnit => SkValueKind::Unit,
+            SkOp::ConstBool(_) => SkValueKind::Bool,
             SkOp::ConstI64(_) => SkValueKind::I64,
             SkOp::Block(b) => b.typ(),
             SkOp::Neg(v) => v.typ(),
@@ -130,6 +131,7 @@ pub enum SkMatchPatternOp {
     Wildcard,
     Union(Vec<SkMatchPatternOp>),
     Variable(usize),
+    BooleanLiteral(bool),
     NumberLiteral(i64),
     StringLiteral(String),
     IsTypeOrEnum(SymbolRefOrEnum),
@@ -155,6 +157,7 @@ impl SymbolRefOrEnum {
 pub enum SkOp {
     Label(ValueRef, String),
     ConstUnit,
+    ConstBool(bool),
     ConstI64(i64),
     Block(SkBody),
     Neg(ValueRef),
@@ -182,6 +185,10 @@ impl<'a> SkBlockBuilder<'a> {
 
     pub fn const_unit(&mut self) -> Result<ValueRef> {
         Ok(self.op(SkOp::ConstUnit))
+    }
+
+    pub fn const_bool(&mut self, value: bool) -> Result<ValueRef> {
+        Ok(self.op(SkOp::ConstBool(value)))
     }
 
     pub fn const_i64(&mut self, value: i64) -> Result<ValueRef> {

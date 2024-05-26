@@ -187,6 +187,7 @@ impl ToRustPrintable for TypeRef {
 impl ToRustPrintable for PrimitiveType {
     fn print_as_rust(&self, _: &impl PrintContext, f: &mut Formatter) -> core::fmt::Result {
         Display::fmt(match &self {
+            PrimitiveType::Bool => "bool",
             PrimitiveType::I16 => "i16",
             PrimitiveType::U32 => "u32",
             PrimitiveType::I64 => "i64",

@@ -653,6 +653,7 @@ impl ToJavaPrintable for TypeRef {
 impl ToJavaPrintable for PrimitiveType {
     fn print_as_java(&self, _: &impl PrintContext, f: &mut Formatter) -> core::fmt::Result {
         Display::fmt(match &self {
+            PrimitiveType::Bool => "boolean",
             PrimitiveType::I16 => "short",
             PrimitiveType::U32 => "long",
             PrimitiveType::I64 => "long",

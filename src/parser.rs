@@ -187,6 +187,7 @@ pub enum Visibility {
 
 #[derive(Eq, Copy, Clone, PartialEq, Debug)]
 pub enum Type<'a> {
+    Bool,
     I16,
     U32,
     I64,
@@ -390,6 +391,7 @@ fn parse_type<'a>(tokens: &mut Vec<Token<'a>>) -> Result<Option<Type<'a>>> {
         Some(Symbol(_)) => Some(match parse_identifier(tokens)
             .unwrap_or_expected_at(tokens, "expected a type identifier")
             .when_parsing("the type identifier")? {
+            Identifier("bool") => Type::Bool,
             Identifier("i16") => Type::I16,
             Identifier("u32") => Type::U32,
             Identifier("i64") => Type::I64,
