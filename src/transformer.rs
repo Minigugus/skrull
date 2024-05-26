@@ -1,3 +1,5 @@
+mod match_op;
+
 use alloc::{format, vec};
 use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
@@ -13,7 +15,7 @@ use crate::mlir::ops::{BlockBuilder, Body as Body0, RefId, RuntimeValue, Typed};
 use crate::scope::{Loc, Scope, Scopes};
 use crate::types::{EnumDef, EnumVariantFields, FunctionDef, Module, PrimitiveType, Scope as ScopeNode, StructDef, StructFields, Symbol, SymbolRef, TypeRef, value_kind_to_type_ref};
 
-type JavaSymbolRef = (usize, Rc<String>);
+type JavaSymbolRef = (usize, Rc<String>, Option<String>);
 
 trait ToJavaResolver {
     fn convert_refs(&self, r: &SymbolRef) -> JavaSymbolRef;
@@ -84,7 +86,7 @@ impl Display for JavaType {
             JavaType::Long => write!(f, "long"),
             JavaType::Float => write!(f, "float"),
             JavaType::Double => write!(f, "double"),
-            JavaType::Class((_, fqdn)) => write!(f, "{fqdn}"),
+            JavaType::Class((_, fqdn, ..)) => write!(f, "{fqdn}"),
         }
     }
 }
@@ -93,6 +95,7 @@ impl JavaType {
     pub fn from_type_ref(ctx: &(impl ToJavaResolver + ?Sized), value: &TypeRef) -> Self {
         match value {
             TypeRef::Primitive(p) => match p {
+                PrimitiveType::Bool => JavaType::Boolean,
                 PrimitiveType::I16 => JavaType::Short,
                 PrimitiveType::U32 => JavaType::Long,
                 PrimitiveType::I64 => JavaType::Long,
@@ -249,9 +252,16 @@ impl<'a> Display for WithMethods<'a, JavaSealedInterface> {
         print_as_java_doc(f, "", doc, None)?;
         write!(f, "{visibility}sealed interface {name} {{\n")?;
         let mut permitted = permitted.iter();
+        let empty = BTreeMap::default();
         while let Some(variant) = permitted.next() {
-            write!(f, "\n{}", WithMethods(variant, *methods))?;
+            write!(f, "\n{}", WithMethods(variant, &empty))?;
         }
+        if !methods.is_empty() {
+            write!(f, "\n\n")?;
+            for fun in methods.values() {
+                write!(f, "{fun}")?;
+            }
+        };
         write!(f, "\n\n}}\n")?;
         Ok(())
     }
@@ -309,9 +319,9 @@ impl Display for JavaFunction {
         } = self;
         print_as_java_doc(f, "  ", doc, None)?;
         write!(f, "  {visibility}static {ret_type} {name}(")?;
-        let mut parameters = parameters.iter();
+        let mut params = parameters.iter();
         let mut is_first = true;
-        while let Some(JavaFunctionParameter { name, fqdn }) = parameters.next() {
+        while let Some(JavaFunctionParameter { name, fqdn }) = params.next() {
             if is_first {
                 is_first = false;
             } else {
@@ -328,97 +338,173 @@ impl Display for JavaFunction {
             return Ok(());
         };
 
-        fn get(f: &mut Formatter<'_>, body: &JavaBody, v: &JavaValueRef) -> Result<Rc<String>, core::fmt::Error> {
+        fn get(f: &mut Formatter<'_>, body: &JavaBody, scope: &mut JavaPrintScope, v: &JavaValueRef) -> Result<Rc<String>, core::fmt::Error> {
+            if let Some(known) = scope.get(v) {
+                return Ok(known.clone());
+            }
             let kind = v.typ();
             let op = body.op(v);
             let indent = "  ".repeat(2 + body.depth());
-            if let JavaValueKind::Var(v) = kind {
-                return Ok(Rc::new(v.0.clone()));
-            } else if op.is_some() && !matches!(op, Some(JavaOpN::If(..) | JavaOpN::GetParam(_, _) | JavaOpN::ConstLong(_) | JavaOpN::ConstShort(_))) {
+            if op.is_some() && op.unwrap().should_store_in_var() {
                 let id = Loc::from(v);
-                let expr = print_rec(f, body, op.unwrap(), &kind)?;
+                let expr = print_rec(f, body, scope, op.unwrap())?;
                 let var_name = Rc::new(format!("_{}_{}{}", id.depth, if id.p { "p" } else { "" }, id.id));
                 write!(f, "{indent}final {kind} {var_name} = {expr};\n")?;
+                scope.bind(v, var_name.clone()).map_err(|_| core::fmt::Error)?;
                 Ok(var_name)
             } else if let Some(JavaOpN::If(e, tb, fb)) = op {
-                let e = get(f, body, e)?;
+                let e = get(f, body, scope, e)?;
                 let id = Loc::from(v);
                 let var_name = Rc::new(format!("_if_{}_{}{}", id.depth, if id.p { "p" } else { "" }, id.id));
                 write!(f, "{indent}final {kind} {var_name};\n")?;
                 write!(f, "{indent}if ({e}) {{\n")?;
-                print_nested_body(f, &indent, tb, &var_name)?;
+                print_nested_body(f, &indent, tb, scope, &var_name)?;
                 write!(f, "{indent}}} else {{\n")?;
-                print_nested_body(f, &indent, fb, &var_name)?;
+                print_nested_body(f, &indent, fb, scope, &var_name)?;
                 write!(f, "{indent}}}\n")?;
+                scope.bind(v, var_name.clone()).map_err(|_| core::fmt::Error)?;
                 Ok(var_name)
+            } else if let Some(JavaOpN::VarDef(k)) = op {
+                let id = Loc::from(v);
+                let var_name = Rc::new(format!("_var_{}_{}{}", id.depth, if id.p { "p" } else { "" }, id.id));
+                let def = k.default_value();
+                write!(f, "{indent}{k} {var_name} = {def};\n")?;
+                scope.bind(v, var_name.clone()).map_err(|_| core::fmt::Error)?;
+                Ok(var_name)
+            } else if let Some(JavaOpN::VarSet(var, val)) = op {
+                let var_name = get(f, body, scope, var)?;
+                let val = get(f, body, scope, val)?;
+                write!(f, "{indent}{var_name} = {val};\n")?;
+                let placeholder = Rc::new("()".to_string());
+                scope.bind(v, placeholder.clone()).map_err(|_| core::fmt::Error)?;
+                Ok(placeholder)
+            } else if let Some(JavaOpN::Unreachable(msg)) = op {
+                write!(f, "{indent}assert false : \"{msg}\"\n")?;
+                let val = Rc::new("null".to_string());
+                scope.bind(v, val.clone()).map_err(|_| core::fmt::Error)?;
+                Ok(val)
             } else if op.is_some() {
-                Ok(print_rec(f, body, op.unwrap(), &kind)?)
+                let val = print_rec(f, body, scope, op.unwrap())?;
+                scope.bind(v, val.clone()).map_err(|_| core::fmt::Error)?;
+                Ok(val)
             } else {
-                unreachable!("no Op to write!");
+                panic!("no Op to write! Cannot resolve {v:?} in {scope:?}: {:?} (body: {body:#?})", scope.get(v));
             }
         }
 
-        fn print_nested_body(f: &mut Formatter, indent: &String, tb: &JavaBody, var_name: &Rc<String>) -> Result<(), Error> {
-            match tb.terminator_op() {
-                // JavaTerminatorOpN::Return => write!(f, "{indent}{var_name} = /* NO VALUE :'( */;\n")?,
+        fn print_nested_body(f: &mut Formatter, indent: &str, body: &JavaBody, scope: &mut JavaPrintScope, var_name: &Rc<String>) -> Result<(), Error> {
+            let scope = &mut scope.nested([]);
+            for (v, _) in body.entries() {
+                let _ = get(f, body, scope, &v)?;
+            }
+            match body.terminator_op() {
                 JavaTerminatorOpN::Return => {} // nothing to print
+                JavaTerminatorOpN::Unreachable(msg) => {
+                    write!(f, "{indent}  throw new AssertionError(\"UNREACHABLE: {msg}\");\n")?;
+                }
                 JavaTerminatorOpN::ReturnValue(v) => {
-                    let ne = get(f, tb, v)?;
+                    let ne = get(f, body, scope, v)?;
                     write!(f, "{indent}  {var_name} = {ne};\n")?;
                 }
             }
             Ok(())
         }
 
-        fn print_rec(f: &mut Formatter<'_>, body: &JavaBody, op: &JavaOpN, kind: &JavaValueKind) -> Result<Rc<String>, core::fmt::Error> {
-            match kind {
-                JavaValueKind::Var(v) => return Ok(Rc::new(v.0.clone())),
-                _ => {}
-            }
+        fn print_rec(f: &mut Formatter<'_>, body: &JavaBody, scope: &mut JavaPrintScope, op: &JavaOpN) -> Result<Rc<String>, core::fmt::Error> {
             match op {
+                JavaOpN::ConstNull => Ok(Rc::new("null".to_string())),
+                JavaOpN::ConstString(v) => Ok(Rc::new(format!("\"{v}\""))),
+                JavaOpN::ConstBool(v) => Ok(Rc::new(if *v { "true" } else { "false" }.to_string())),
                 JavaOpN::ConstShort(n) => Ok(Rc::new(format!("{n}"))),
                 JavaOpN::ConstLong(n) => Ok(Rc::new(format!("{n}"))),
                 JavaOpN::Add(l, r) => {
-                    let l = get(f, body, l)?;
-                    let r = get(f, body, r)?;
+                    let l = get(f, body, scope, l)?;
+                    let r = get(f, body, scope, r)?;
                     Ok(Rc::new(format!("{l} + {r}")))
                 }
                 JavaOpN::Gt(l, r) => {
-                    let l = get(f, body, l)?;
-                    let r = get(f, body, r)?;
+                    let l = get(f, body, scope, l)?;
+                    let r = get(f, body, scope, r)?;
                     Ok(Rc::new(format!("{l} > {r}")))
                 }
-                JavaOpN::Create((_, s), p) => {
+                JavaOpN::Eq(l, r) => {
+                    let l = get(f, body, scope, l)?;
+                    let r = get(f, body, scope, r)?;
+                    Ok(Rc::new(format!("{l} == {r}")))
+                }
+                JavaOpN::And(l, r) => {
+                    let l = get(f, body, scope, l)?;
+                    let r = get(f, body, scope, r)?;
+                    Ok(Rc::new(format!("{l} && {r}")))
+                }
+                JavaOpN::Or(l, r) => {
+                    let l = get(f, body, scope, l)?;
+                    let r = get(f, body, scope, r)?;
+                    Ok(Rc::new(format!("{l} || {r}")))
+                }
+                JavaOpN::Create((_, s, ..), p) => {
                     let p = p
                         .iter()
-                        .map(|v| get(f, body, v).map(|s| s.to_string())) // FIXME
+                        .map(|v| get(f, body, scope, v).map(|s| s.to_string())) // FIXME
                         .collect::<Result<Vec<_>, core::fmt::Error>>()?
                         .join(", ");
                     Ok(Rc::new(format!("new {s}({p})")))
                 }
                 JavaOpN::Neg(v) => {
-                    let v = get(f, body, v)?;
+                    let v = get(f, body, scope, v)?;
                     Ok(Rc::new(format!("-{v}")))
                 }
-                JavaOpN::Nop(v) => get(f, body, v),
+                JavaOpN::Nop(v) => get(f, body, scope, v),
                 JavaOpN::GetParam(_, n) => Ok(n.clone()),
-                JavaOpN::InvokeStatic((_, s), _, n, a) => {
+                JavaOpN::GetTupleField(e, _, fi) => {
+                    let e = get(f, body, scope, e)?;
+                    Ok(Rc::new(format!("{e}._{fi}()")))
+                }
+                JavaOpN::GetRecordField(e, _, fi) => {
+                    let e = get(f, body, scope, e)?;
+                    Ok(Rc::new(format!("{e}.{fi}()")))
+                }
+                JavaOpN::InvokeStatic((_, s, ..), _, n, a) => {
                     let a = a
                         .iter()
-                        .map(|v| get(f, body, v).map(|s| s.to_string())) // FIXME
+                        .map(|v| get(f, body, scope, v).map(|s| s.to_string())) // FIXME
                         .collect::<Result<Vec<_>, core::fmt::Error>>()?
                         .join(", ");
                     Ok(Rc::new(format!("{s}.{n}({a})")))
                 }
                 JavaOpN::Error(msg) => Ok(Rc::new(format!("/* TODO {msg} */"))),
+                JavaOpN::Unreachable(msg) => Ok(Rc::new(format!("null /* UNREACHABLE {msg} */"))),
                 JavaOpN::If(_, _, _) => Ok(Rc::new("()".into())),
+                JavaOpN::InstanceOf(e, (_, s, ..)) => {
+                    let e = get(f, body, scope, e)?;
+                    Ok(Rc::new(format!("{e} instanceof {s}")))
+                }
+                JavaOpN::Cast(e, k) => {
+                    let e = get(f, body, scope, e)?;
+                    Ok(Rc::new(format!("(({}) {e})", k.1)))
+                }
+                JavaOpN::VarDef(..) => Ok(Rc::new("()".into())),
+                JavaOpN::VarSet(..) => Ok(Rc::new("()".into())),
+                JavaOpN::VarGet(v) => Ok(get(f, body, scope, v)?),
             }
         }
 
         match body.terminator_op() {
             JavaTerminatorOpN::Return => {}
+            JavaTerminatorOpN::Unreachable(msg) => {
+                write!(f, "    throw new AssertionError(\"UNREACHABLE: {msg}\");\n")?;
+            }
             JavaTerminatorOpN::ReturnValue(v) => {
-                let expr = get(f, body, v)?;
+                let mut scopes = JavaPrintScopes::new();
+                let params = parameters
+                    .iter()
+                    .map(|p| Rc::new(p.name.clone()))
+                    .collect::<Vec<_>>();
+                let mut scope = scopes.root(params);
+                for (v, _) in body.entries() {
+                    let _ = get(f, body, &mut scope, &v)?;
+                }
+                let expr = get(f, body, &mut scope, v)?;
                 write!(f, "    return {expr};\n")?;
             }
         }
@@ -520,11 +606,22 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
         for (id, s) in src.symbols_ref() {
             let java_ref: JavaSymbolRef = (
                 builder.pending_symbols.len(),
-                Rc::new(format!("{root_pkg}.{}", s.name()))
+                Rc::new(format!("{root_pkg}.{}", s.name())),
+                None
             );
             builder.pending_symbols.push((java_ref.1.clone(), match s {
                 Symbol::Struct(v) => v.into(),
-                Symbol::Enum(v) => v.into(),
+                Symbol::Enum(v) => {
+                    for v in v.variants() {
+                        let variant_ref: JavaSymbolRef = (
+                            java_ref.0.clone(),
+                            Rc::new(format!("{}.{}", java_ref.1, v.name())),
+                            Some(v.name().to_string())
+                        );
+                        builder.by_fqdn.insert(variant_ref.1.clone(), variant_ref);
+                    }
+                    v.into()
+                }
                 Symbol::Function(v) => {
                     builder.pending_functions.push((id, v));
                     continue;
@@ -627,7 +724,8 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
         }
         let utils_sym: JavaSymbolRef = (
             builder.pending_symbols.len(),
-            Rc::new(format!("{root_pkg}.Utils"))
+            Rc::new(format!("{root_pkg}.Utils")),
+            None
         );
         module.by_fqdn.insert(utils_sym.1.to_string(), utils_sym.0);
         module.symbols.push(JavaSymbol {
@@ -695,20 +793,63 @@ impl JavaModule {
             .get(fqdn)
             .and_then(|id| self.symbols.get(*id))
     }
+
+    pub fn resolve_enum_variant(&self, fqdn: &str, variant: &str) -> Option<JavaSymbolRef> {
+        let id = self.by_fqdn.get(fqdn)?;
+        match self.symbols.get(*id) {
+            Some(JavaSymbol { kind: JavaSymbolKind::SealedInterface(si), .. }) if si.permitted.iter().find(|v| variant == v.name).is_some() => Some((
+                *id,
+                format!("{fqdn}.{variant}").into(),
+                Some(variant.to_string())
+            )),
+            _ => None
+        }
+    }
+
+    pub fn resolve_record_field(&self, sr: &JavaSymbolRef, name: &str) -> Option<&JavaField> {
+        let sym = self.symbols.get(sr.0)?;
+        match sym {
+            JavaSymbol { kind: JavaSymbolKind::Record(rec), .. } => rec.fields.iter().find(|f| *name == *f.name),
+            JavaSymbol { kind: JavaSymbolKind::SealedInterface(si), .. } => if let Some(vn) = &sr.2 {
+                if let Some(v) = si.permitted.iter().find(|nr| *vn == *nr.name) {
+                    v.fields.iter().find(|f| *name == *f.name)
+                } else {
+                    None
+                }
+            } else {
+                None
+            },
+            _ => None
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 enum JavaOpN {
     Error(Cow<'static, str>),
+    Unreachable(Cow<'static, str>),
     Nop(JavaValueRef),
+    VarDef(JavaValueKind),
+    VarSet(JavaValueRef, JavaValueRef),
+    VarGet(JavaValueRef),
     Neg(JavaValueRef),
+    ConstNull,
+    ConstString(String),
+    ConstBool(bool),
     ConstShort(i16),
     ConstLong(i64),
+    Cast(JavaValueRef, JavaSymbolRef),
     GetParam(JavaValueKind, Rc<String>),
+    GetTupleField(JavaValueRef, JavaValueKind, usize),
+    GetRecordField(JavaValueRef, JavaValueKind, String),
     InvokeStatic(JavaSymbolRef, JavaValueKind, Rc<String>, Vec<JavaValueRef>),
     Create(JavaSymbolRef, Vec<JavaValueRef>),
     Add(JavaValueRef, JavaValueRef),
     Gt(JavaValueRef, JavaValueRef),
+    Eq(JavaValueRef, JavaValueRef),
+    And(JavaValueRef, JavaValueRef),
+    Or(JavaValueRef, JavaValueRef),
+    InstanceOf(JavaValueRef, JavaSymbolRef),
     If(JavaValueRef, JavaBody, JavaBody),
 }
 
@@ -716,6 +857,7 @@ enum JavaOpN {
 enum JavaTerminatorOpN {
     Return,
     ReturnValue(JavaValueRef),
+    Unreachable(Cow<'static, str>),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -729,15 +871,55 @@ enum JavaValueKind {
     // Int,
     // Type(JavaSymbolRef),
     JavaType(JavaType),
-    Var(Rc<(String, JavaValueKind)>),
+    OpaqueVar(Rc<JavaValueKind>),
 }
 
 impl JavaValueKind {
     pub fn as_value_type(&self) -> &JavaValueKind {
         match self {
-            JavaValueKind::Var(v) => &v.deref().1,
+            JavaValueKind::OpaqueVar(v) => v.deref(),
             o => o
         }
+    }
+
+    pub fn default_value(&self) -> &str {
+        match self {
+            JavaValueKind::Never => "null",
+            JavaValueKind::Void => "null",
+            JavaValueKind::JavaType(typ) => match typ {
+                JavaType::Void => "null",
+                JavaType::Boolean => "false",
+                JavaType::Byte => "(byte) 0",
+                JavaType::Short => "(short) 0",
+                JavaType::Int => "0",
+                JavaType::Long => "0l",
+                JavaType::Float => "0f",
+                JavaType::Double => "0d",
+                JavaType::Class(_) => "null",
+            }
+            JavaValueKind::OpaqueVar(_) => "null /* VAR !? */",
+        }
+    }
+}
+
+impl JavaOpN {
+    fn should_store_in_var(&self) -> bool {
+        !matches!(self,
+            JavaOpN::Nop(..) |
+            JavaOpN::If(..) |
+            JavaOpN::VarDef(..) |
+            JavaOpN::VarSet(..) |
+            JavaOpN::VarGet(..) |
+            JavaOpN::Unreachable(..) |
+            JavaOpN::GetParam(..) |
+            JavaOpN::ConstLong(..) |
+            JavaOpN::ConstShort(..) |
+            JavaOpN::ConstBool(..) |
+            JavaOpN::And(..) |
+            JavaOpN::Or(..) |
+            JavaOpN::Eq(..) |
+            JavaOpN::InstanceOf(..)
+        )
     }
 }
 
@@ -748,25 +930,65 @@ impl Typed for JavaOpN {
         fn bin_op_typ<T: Typed<ValueType=JavaValueKind>>(l: &T, r: &T) -> JavaValueKind {
             let l = l.typ().as_value_type().clone();
             let r = r.typ();
-            if l == *r.as_value_type() {
+            if matches!(l, JavaValueKind::Never) {
+                r
+            } else if matches!(r, JavaValueKind::Never) {
+                l
+            } else if l == *r.as_value_type() {
                 l
             } else {
-                JavaValueKind::Never
+                let (l, r) = match (l, r) {
+                    (JavaValueKind::JavaType(l), JavaValueKind::JavaType(r)) => (l, r),
+                    _ => return JavaValueKind::Never
+                };
+                JavaValueKind::JavaType(match (l, r) {
+                    (JavaType::Byte, JavaType::Short) | (JavaType::Short, JavaType::Byte) => JavaType::Short,
+                    (JavaType::Byte, JavaType::Int) | (JavaType::Int, JavaType::Byte) => JavaType::Int,
+                    (JavaType::Byte, JavaType::Long) | (JavaType::Long, JavaType::Byte) => JavaType::Long,
+                    (JavaType::Byte, JavaType::Float) | (JavaType::Float, JavaType::Byte) => JavaType::Float,
+                    (JavaType::Byte, JavaType::Double) | (JavaType::Double, JavaType::Byte) => JavaType::Double,
+
+                    (JavaType::Short, JavaType::Int) | (JavaType::Int, JavaType::Short) => JavaType::Int,
+                    (JavaType::Short, JavaType::Long) | (JavaType::Long, JavaType::Short) => JavaType::Long,
+                    (JavaType::Short, JavaType::Float) | (JavaType::Float, JavaType::Short) => JavaType::Float,
+                    (JavaType::Short, JavaType::Double) | (JavaType::Double, JavaType::Short) => JavaType::Double,
+
+                    (JavaType::Int, JavaType::Long) | (JavaType::Long, JavaType::Int) => JavaType::Long,
+                    (JavaType::Int, JavaType::Double) | (JavaType::Double, JavaType::Int) => JavaType::Double,
+
+                    (JavaType::Long, JavaType::Double) | (JavaType::Double, JavaType::Long) => JavaType::Double,
+
+                    _ => return JavaValueKind::Never
+                })
             }
         }
 
         match self {
             JavaOpN::Add(l, r) => bin_op_typ(l, r),
             JavaOpN::Gt(_, _) => JavaValueKind::JavaType(JavaType::Boolean),
+            JavaOpN::Eq(_, _) => JavaValueKind::JavaType(JavaType::Boolean),
+            JavaOpN::And(_, _) => JavaValueKind::JavaType(JavaType::Boolean),
+            JavaOpN::Or(_, _) => JavaValueKind::JavaType(JavaType::Boolean),
+            JavaOpN::InstanceOf(_, _) => JavaValueKind::JavaType(JavaType::Boolean),
+            JavaOpN::ConstNull => JavaValueKind::Void,
+            JavaOpN::ConstString(_) => JavaValueKind::JavaType(JavaType::Class((usize::MAX, "java.lang.String".to_string().into(), None))),
+            JavaOpN::ConstBool(_) => JavaValueKind::JavaType(JavaType::Boolean),
             JavaOpN::ConstLong(_) => JavaValueKind::JavaType(JavaType::Long),
             JavaOpN::ConstShort(_) => JavaValueKind::JavaType(JavaType::Short),
             JavaOpN::Create(s, _) => JavaValueKind::JavaType(JavaType::Class(s.clone())),
+            JavaOpN::Cast(_, s) => JavaValueKind::JavaType(JavaType::Class(s.clone())),
             JavaOpN::Error(_) => JavaValueKind::Never,
+            JavaOpN::Unreachable(_) => JavaValueKind::Never,
             JavaOpN::GetParam(k, _) => k.clone(),
+            JavaOpN::GetTupleField(_, k, _) => k.clone(),
+            JavaOpN::GetRecordField(_, k, _) => k.clone(),
             JavaOpN::If(_, t, f) => bin_op_typ(t, f),
             JavaOpN::InvokeStatic(_, k, _, _) => k.clone(),
             JavaOpN::Neg(v) => v.typ(),
             JavaOpN::Nop(v) => v.typ(),
+            JavaOpN::VarDef(k) => JavaValueKind::OpaqueVar(Rc::from(k.clone())),
+            JavaOpN::VarSet(_, _) => JavaValueKind::Void,
+            JavaOpN::VarGet(vr) => vr.typ().as_value_type().clone(),
         }
     }
 }
@@ -777,7 +999,8 @@ impl Typed for JavaTerminatorOpN {
     fn typ(&self) -> Self::ValueType {
         match self {
             JavaTerminatorOpN::Return => JavaValueKind::Void,
-            JavaTerminatorOpN::ReturnValue(v) => v.typ()
+            JavaTerminatorOpN::ReturnValue(v) => v.typ(),
+            JavaTerminatorOpN::Unreachable(_) => JavaValueKind::Never
         }
     }
 }
@@ -785,7 +1008,7 @@ impl Typed for JavaTerminatorOpN {
 impl Display for JavaValueKind {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
-            JavaValueKind::Never => write!(f, "???"),
+            JavaValueKind::Never => write!(f, "var /* ??? */"),
             JavaValueKind::Void => write!(f, "void"),
             // JavaValueKind::Bool => write!(f, "boolean"),
             // JavaValueKind::Byte => write!(f, "byte"),
@@ -796,7 +1019,7 @@ impl Display for JavaValueKind {
             // JavaValueKind::Double => write!(f, "double"),
             // JavaValueKind::Type((_, fqdn)) => Display::fmt(&*fqdn, f),
             JavaValueKind::JavaType(jt) => Display::fmt(jt, f),
-            JavaValueKind::Var(v) => Display::fmt(&v.0, f),
+            JavaValueKind::OpaqueVar(v) => Display::fmt(v, f),
         }
     }
 }
@@ -815,8 +1038,11 @@ type JavaValueRef = RuntimeValue<JavaValueKind>;
 type JavaBody = Body0<JavaValueKind, JavaOpN, JavaTerminatorOpN>;
 type JavaBlockBuilder<'a> = BlockBuilder<'a, SkValueKind, JavaOpN, JavaTerminatorOpN>;
 
-type JavaScopes<'a> = Scopes<JavaValueKind>;
-type JavaScope<'a> = Scope<'a, JavaValueKind>;
+type JavaScopes<'a> = Scopes<JavaValueRef>;
+type JavaScope<'a> = Scope<'a, JavaValueRef>;
+
+type JavaPrintScopes<'a> = Scopes<Rc<String>>;
+type JavaPrintScope<'a> = Scope<'a, Rc<String>>;
 
 impl<'a> TryFrom<(&'a SkBody, &'a JavaModuleBuilder<'_>, &'a JavaModule)> for JavaBody {
     type Error = Cow<'static, str>;
@@ -824,7 +1050,7 @@ impl<'a> TryFrom<(&'a SkBody, &'a JavaModuleBuilder<'_>, &'a JavaModule)> for Ja
     fn try_from((pb, builder, module): (&'a SkBody, &'a JavaModuleBuilder, &'a JavaModule)) -> Result<Self, Self::Error> {
         let params = pb.params()
             .iter()
-            .map(|x| JavaValueKind::Never) // TODO
+            .map(|x| builder.convert_kind(x)) // TODO
             .collect::<Vec<_>>();
         Ok(Self::isolated(params.as_slice(), |b, args| {
             let mut scopes = JavaScopes::new();
@@ -877,21 +1103,14 @@ impl JavaBody {
         op: &SkOp,
     ) -> Result<JavaOpN, Cow<'static, str>> {
         Ok(match op {
-            SkOp::Label(v, n) => {
-                match v.id() {
-                    RefId::Param(_) => {
-                        let s = builder.convert_kind(&v.typ());
-                        JavaOpN::GetParam(JavaValueKind::Var(Rc::new((n.clone(), s))), Rc::new(n.clone()))
-                    }
-                    RefId::Op(_) => match scope.get(v).cloned() {
-                        None => JavaOpN::Error("no mapping found for SkOp::Add arg".into()),
-                        Some(v) => JavaOpN::Nop(v)
-                    }
-                }
-            }
+            SkOp::Label(v, _) => match scope.get(v).cloned() {
+                None => JavaOpN::Error("no mapping found for SkOp::Label arg".into()),
+                // None => panic!("no mapping found for SkOp::Label arg: {v:?} in {scope:?}"),
+                Some(v) => JavaOpN::Nop(v.clone())
+            },
             SkOp::ConstUnit => JavaOpN::Error("SkOp::ConstUnit conversion not implemented".into()),
-            SkOp::ConstBool(v) => JavaOpN::Error("SkOp::ConstBool conversion not implemented".into()),
             SkOp::ConstI64(n) if *n < i16::MAX as i64 => JavaOpN::ConstShort(n.clone() as i16),
+            SkOp::ConstBool(v) => JavaOpN::ConstBool(*v),
             SkOp::ConstI64(n) => JavaOpN::ConstLong(n.clone()),
             SkOp::Block(_) => JavaOpN::Error("SkOp::Block conversion not implemented".into()), // TODO
             SkOp::Neg(v) => match v.id() {
@@ -994,7 +1213,20 @@ impl JavaBody {
                     },
                 }
             }
-            SkOp::Match(_, _) => JavaOpN::Error("SkOp::Match conversion not implemented".into()), // TODO
+            SkOp::Match(e, p) => match e.id() {
+                RefId::Param(_) => JavaOpN::Error("SkOp::Match expression arg cannot be an RefId::Param".into()),
+                RefId::Op(_) => match scope.get(e).cloned() {
+                    None => JavaOpN::Error("no mapping found for SkOp::Match expression arg".into()),
+                    Some(e) => {
+                        let mut iter = p.iter();
+                        if let Some(first) = iter.next() {
+                            Self::visit_match_case(builder, module, b, scope, first, iter, e)?
+                        } else {
+                            JavaOpN::Error("No case in SkOp::Match!".into())
+                        }
+                    }
+                }
+            },
         })
     }
 }
@@ -1016,7 +1248,7 @@ fn new_rect(x: i16, y: i16, w: i16, h: i16) -> Rectangle {
   Rectangle {
     origin: new_point(x, y),
     size: Size {
-      width: times2(w),
+      width: times2(w), // FIXME incompatible cast should be detected
       height: h,
     },
   }
@@ -1264,10 +1496,10 @@ fn it_transform_enum() -> Result<(), Cow<'static, str>> {
 
 struct Some(Price);
 
-pub fn is_priced(maybe_price: Some) -> i16 {
+pub fn is_priced(maybe_price: Some) -> bool {
   match maybe_price {
-    Some(Price::Limit | Price::StopLimit) => 1,
-    _ => 0
+    Some(Price::Limit | Price::StopLimit) => true,
+    _ => false
   }
 }
 "#)?;
@@ -1302,9 +1534,22 @@ record Some(
   skull_test_transform_enum.Price _0
 ) {
 
-  public static short is_priced(skull_test_transform_enum.Some maybe_price) {
-    final ??? _0_1 = /* TODO SkOp::Match conversion not implemented */;
-    return _0_1;
+  public static boolean is_priced(skull_test_transform_enum.Some maybe_price) {
+    final boolean _if_0_2;
+    if (maybe_price instanceof skull_test_transform_enum.Some) {
+      final skull_test_transform_enum.Some _1_0 = ((skull_test_transform_enum.Some) maybe_price);
+      final skull_test_transform_enum.Price _1_1 = _1_0._0();
+      _if_0_2 = _1_1 instanceof skull_test_transform_enum.Price.Limit || _1_1 instanceof skull_test_transform_enum.Price.StopLimit;
+    } else {
+      _if_0_2 = false;
+    }
+    final boolean _if_0_3;
+    if (_if_0_2) {
+      _if_0_3 = true;
+    } else {
+      _if_0_3 = false;
+    }
+    return _if_0_3;
   }
 
 }"#.to_string())

@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::fmt::Debug;
 
 use crate::mlir::ops::{BlockBuilder, Body, RuntimeValue, Typed};
-use crate::types::SymbolRef;
+use crate::types::{LoaderContext, StructFields, Symbol, SymbolRef};
 
 type Result<T> = core::result::Result<T, Cow<'static, str>>;
 
@@ -149,6 +149,30 @@ impl SymbolRefOrEnum {
     pub fn owner_type(&self) -> &SymbolRef {
         match self {
             SymbolRefOrEnum::Type(t) | SymbolRefOrEnum::Enum(t, _) => &t,
+        }
+    }
+
+    pub fn fields<'a>(&self, ctx: &'a impl LoaderContext) -> Result<&'a StructFields> {
+        match self {
+            SymbolRefOrEnum::Type(s) => match ctx.get_symbol_from_ref(s) {
+                Ok(s) => match s {
+                    Symbol::Struct(s) => Ok(s.fields()),
+                    Symbol::Enum(_) => Err("Expected a struct, not an enum".into()),
+                    Symbol::Function(_) => Err("Expected a struct, not a function".into()),
+                }
+                Err(msg) => Err(msg)
+            }
+            SymbolRefOrEnum::Enum(s, v) => match ctx.get_symbol_from_ref(s) {
+                Ok(s) => match s {
+                    Symbol::Enum(s) => match s.variants().iter().find(|vv| vv.name() == v.as_str()) {
+                        Some(v) => Ok(v.fields()),
+                        None => Err("Enum doesn't have this variant".into()),
+                    },
+                    Symbol::Struct(s) => Err("Expected an enum, not a struct".into()),
+                    Symbol::Function(_) => Err("Expected an enum, not a function".into()),
+                }
+                Err(msg) => Err(msg)
+            }
         }
     }
 }

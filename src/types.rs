@@ -475,62 +475,64 @@ impl<'a> BlockExpression<'a> {
                                     MatchPattern::IsEnumOrType(q) => SkMatchPatternOp::IsTypeOrEnum(visit_qualifier(ctx, q)?),
                                     MatchPattern::TupleStruct { typ, params, exact } => {
                                         let typ = visit_qualifier(ctx, typ)?;
-                                        let s = ctx.get_symbol_from_ref(typ.owner_type())?;
-                                        let (name, fields) = match s {
-                                            Symbol::Struct(StructDef { fields: StructFields::Tuple(fields), name, .. }) => (name, fields),
-                                            s => return Err(format!("{s:?} isn't a tuple struct").into())
-                                        };
+                                        let fields = typ.fields(ctx)?;
 
                                         let m = params.len();
 
-                                        SkMatchPatternOp::TupleStruct {
-                                            typ,
-                                            params: params
-                                                .iter()
-                                                .enumerate()
-                                                .map(|(i, p)| {
-                                                    if let Some(f) = fields.get(i) {
-                                                        let typ = type_ref_to_value_kind(f.r#type());
-                                                        visit_pattern(&typ, p, ctx, vars_by_name)
-                                                    } else {
-                                                        let n = fields.len();
-                                                        Err(format!("Tuple struct {name} has only {n} fields but there are {m} in the pattern").into())
-                                                    }
-                                                })
-                                                .collect::<Result<Vec<_>>>()?,
-                                            exact: exact.clone(),
+                                        match fields {
+                                            StructFields::Tuple(fields) => SkMatchPatternOp::TupleStruct {
+                                                typ,
+                                                params: params
+                                                    .iter()
+                                                    .enumerate()
+                                                    .map(|(i, p)| {
+                                                        if let Some(f) = fields.get(i) {
+                                                            let typ = type_ref_to_value_kind(f.r#type());
+                                                            visit_pattern(&typ, p, ctx, vars_by_name)
+                                                        } else {
+                                                            let n = fields.len();
+                                                            Err(format!("Tuple struct has only {n} fields but there are {m} in the pattern").into())
+                                                        }
+                                                    })
+                                                    .collect::<Result<Vec<_>>>()?,
+                                                exact: exact.clone(),
+                                            },
+                                            StructFields::Named(_) => Err("A tuple struct pattern cannot be used to match a field struct")?,
+                                            StructFields::Unit => Err("A tuple struct pattern cannot be used to match a unit struct")?,
                                         }
                                     }
                                     MatchPattern::FieldStruct { typ, params, exact } => {
                                         let typ = visit_qualifier(ctx, typ)?;
-                                        let s = ctx.get_symbol_from_ref(typ.owner_type())?;
-                                        let (name, fields) = match s {
-                                            Symbol::Struct(StructDef { fields: StructFields::Named(fields), name, .. }) => (name, fields),
-                                            s => return Err(format!("{s:?} isn't a field struct").into())
-                                        };
+                                        let fields = typ.fields(ctx)?;
 
-                                        let fields = fields
-                                            .iter()
-                                            .map(|x| (x.name.as_str(), x))
-                                            .collect::<BTreeMap<_, _>>();
+                                        match fields {
+                                            StructFields::Named(fields) => {
+                                                let fields = fields
+                                                    .iter()
+                                                    .map(|x| (x.name.as_str(), x))
+                                                    .collect::<BTreeMap<_, _>>();
 
-                                        SkMatchPatternOp::FieldStruct {
-                                            typ,
-                                            params: params
-                                                .iter()
-                                                .map(|(i, p)| {
-                                                    if let Some(f) = fields.get(i.as_ref()) {
-                                                        let typ = type_ref_to_value_kind(f.r#type());
-                                                        Ok((
-                                                            i.as_ref().to_string(),
-                                                            visit_pattern(&typ, p, ctx, vars_by_name)?
-                                                        ))
-                                                    } else {
-                                                        Err(format!("Field struct {name} doesn't have field {i:?}").into())
-                                                    }
-                                                })
-                                                .collect::<Result<Vec<_>>>()?,
-                                            exact: exact.clone(),
+                                                SkMatchPatternOp::FieldStruct {
+                                                    typ,
+                                                    params: params
+                                                        .iter()
+                                                        .map(|(i, p)| {
+                                                            if let Some(f) = fields.get(i.as_ref()) {
+                                                                let typ = type_ref_to_value_kind(f.r#type());
+                                                                Ok((
+                                                                    i.as_ref().to_string(),
+                                                                    visit_pattern(&typ, p, ctx, vars_by_name)?
+                                                                ))
+                                                            } else {
+                                                                Err(format!("Field struct doesn't have field {i:?}").into())
+                                                            }
+                                                        })
+                                                        .collect::<Result<Vec<_>>>()?,
+                                                    exact: exact.clone(),
+                                                }
+                                            }
+                                            StructFields::Tuple(_) => Err("A field struct pattern cannot be used to match a tuple struct")?,
+                                            StructFields::Unit => Err("A field struct pattern cannot be used to match a unit struct")?,
                                         }
                                     }
                                 })
@@ -834,12 +836,7 @@ impl EnumVariant {
     }
 }
 
-#[derive(Debug)]
-pub enum EnumVariantFields {
-    Named(Vec<NamedField>),
-    Tuple(Vec<TupleField>),
-    Unit,
-}
+pub type EnumVariantFields = StructFields;
 
 #[derive(Debug)]
 pub struct TupleField {
