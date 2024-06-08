@@ -1,5 +1,3 @@
-mod match_op;
-
 use alloc::{format, vec};
 use alloc::borrow::Cow;
 use alloc::collections::BTreeMap;
@@ -14,6 +12,8 @@ use crate::lexer::Token;
 use crate::mlir::ops::{BlockBuilder, Body as Body0, RefId, RuntimeValue, Typed};
 use crate::scope::{Loc, Scope, Scopes};
 use crate::types::{EnumDef, EnumVariantFields, FunctionDef, Module, PrimitiveType, Scope as ScopeNode, StructDef, StructFields, Symbol, SymbolRef, TypeRef, value_kind_to_type_ref};
+
+mod match_op;
 
 type JavaSymbolRef = (usize, Rc<String>, Option<String>);
 

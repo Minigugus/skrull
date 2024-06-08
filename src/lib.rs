@@ -7,7 +7,7 @@ pub mod parser;
 pub mod types;
 pub mod printer;
 pub mod bytecode;
-pub mod transformer;
+pub mod transform;
 pub mod eval;
 mod scope;
 
