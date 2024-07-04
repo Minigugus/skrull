@@ -352,7 +352,7 @@ pub fn get_price(priced: Priced) -> f64 {
 "#)?;
 
         // parse + semantic analysis
-        let module = Module::parse_tokens("skull_test_transform_match", tokens)?;
+        let module = Module::parse_tokens("skrull_test_transform_match", tokens)?;
 
         // transform
         let ts = TsModule::try_from(&module)?;
@@ -464,7 +464,7 @@ pub fn plus_one_then_default_if_zero_twice(n: i64, def: i64) -> i64 {
 "#)?;
 
         // parse + semantic analysis
-        let module = Module::parse_tokens("skull_test_transform_simple_match", tokens)?;
+        let module = Module::parse_tokens("skrull_test_transform_simple_match", tokens)?;
 
         // transform
         let ts = TsModule::try_from(&module)?;

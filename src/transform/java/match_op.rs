@@ -351,30 +351,30 @@ pub fn get_price(priced: Priced) -> f64 {
 "#)?;
 
         // parse + semantic analysis
-        let module = Module::parse_tokens("skull_test_transform_match", tokens)?;
+        let module = Module::parse_tokens("skrull_test_transform_match", tokens)?;
 
         // transform
         let java = JavaModule::try_from(&module)?;
 
         assert_eq!(
-            java.resolve("skull_test_transform_match.Priced").map(ToString::to_string),
-            /*language=java*/Some(r#"package skull_test_transform_match;
+            java.resolve("skrull_test_transform_match.Priced").map(ToString::to_string),
+            /*language=java*/Some(r#"package skrull_test_transform_match;
 
 public sealed interface Priced {
 
 record Limit(
   double price
-) implements skull_test_transform_match.Priced { }
-record Market() implements skull_test_transform_match.Priced { }
+) implements skrull_test_transform_match.Priced { }
+record Market() implements skrull_test_transform_match.Priced { }
 record StopLimit(
   double stop_price
-) implements skull_test_transform_match.Priced { }
+) implements skrull_test_transform_match.Priced { }
 
-  public static double get_price(skull_test_transform_match.Priced priced) {
+  public static double get_price(skrull_test_transform_match.Priced priced) {
     double _var_0_1 = 0d;
     final boolean _if_0_3;
-    if (priced instanceof skull_test_transform_match.Priced.Limit) {
-      final skull_test_transform_match.Priced.Limit _1_0 = ((skull_test_transform_match.Priced.Limit) priced);
+    if (priced instanceof skrull_test_transform_match.Priced.Limit) {
+      final skrull_test_transform_match.Priced.Limit _1_0 = ((skrull_test_transform_match.Priced.Limit) priced);
       final double _1_1 = _1_0.price();
       _var_0_1 = _1_1;
       _if_0_3 = true;
@@ -382,8 +382,8 @@ record StopLimit(
       _if_0_3 = false;
     }
     final boolean _if_0_5;
-    if (priced instanceof skull_test_transform_match.Priced.StopLimit) {
-      final skull_test_transform_match.Priced.StopLimit _1_0 = ((skull_test_transform_match.Priced.StopLimit) priced);
+    if (priced instanceof skrull_test_transform_match.Priced.StopLimit) {
+      final skrull_test_transform_match.Priced.StopLimit _1_0 = ((skrull_test_transform_match.Priced.StopLimit) priced);
       final double _1_1 = _1_0.stop_price();
       _var_0_1 = _1_1;
       _if_0_5 = true;
@@ -395,7 +395,7 @@ record StopLimit(
       _if_0_7 = _var_0_1;
     } else {
       final short _if_1_1;
-      if (priced instanceof skull_test_transform_match.Priced.Market) {
+      if (priced instanceof skrull_test_transform_match.Priced.Market) {
         _if_1_1 = 0;
       } else {
         throw new AssertionError("UNREACHABLE: match is supposed to cover all possible cases!!!");
@@ -456,14 +456,14 @@ pub fn plus_one_then_default_if_zero_twice(n: i64, def: i64) -> i64 {
 "#)?;
 
         // parse + semantic analysis
-        let module = Module::parse_tokens("skull_test_transform_simple_match", tokens)?;
+        let module = Module::parse_tokens("skrull_test_transform_simple_match", tokens)?;
 
         // transform
         let java = JavaModule::try_from(&module)?;
 
         assert_eq!(
-            java.resolve("skull_test_transform_simple_match.Utils").map(ToString::to_string),
-            /*language=java*/Some(r#"package skull_test_transform_simple_match;
+            java.resolve("skrull_test_transform_simple_match.Utils").map(ToString::to_string),
+            /*language=java*/Some(r#"package skrull_test_transform_simple_match;
 
 public final class Utils {
 

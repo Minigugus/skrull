@@ -1406,7 +1406,7 @@ pub fn is_priced(maybe_price: Some) -> bool {
 "#)?;
 
     // parse + semantic analysis
-    let module = Module::parse_tokens("skull_test_transform_enum", tokens)?;
+    let module = Module::parse_tokens("skrull_test_transform_enum", tokens)?;
 
     // transform
     let ts = TsModule::try_from(&module)?;

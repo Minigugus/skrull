@@ -5,10 +5,10 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use skull::lexer::Token;
-use skull::transform::java::JavaModule;
-use skull::transform::ts::TsModule;
-use skull::types::Module;
+use skrull::lexer::Token;
+use skrull::transform::java::JavaModule;
+use skrull::transform::ts::TsModule;
+use skrull::types::Module;
 
 #[derive(clap::Parser, Clone)]
 struct ToJavaArgs {
@@ -34,7 +34,7 @@ enum GenerateAction {
 
 #[derive(clap::Subcommand, Clone)]
 enum Action {
-    /// Translate a Skull module into another supported language
+    /// Translate a Skrull module into another supported language
     #[clap(subcommand)]
     Generate(GenerateAction),
 }

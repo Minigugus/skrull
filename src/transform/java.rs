@@ -1509,41 +1509,41 @@ pub fn is_priced(maybe_price: Some) -> bool {
 "#)?;
 
     // parse + semantic analysis
-    let module = Module::parse_tokens("skull_test_transform_enum", tokens)?;
+    let module = Module::parse_tokens("skrull_test_transform_enum", tokens)?;
 
     // transform
     let java = JavaModule::try_from(&module)?;
 
     assert_eq!(
-        java.resolve("skull_test_transform_enum.Price").map(ToString::to_string),
-        /*language=java*/Some(r#"package skull_test_transform_enum;
+        java.resolve("skrull_test_transform_enum.Price").map(ToString::to_string),
+        /*language=java*/Some(r#"package skrull_test_transform_enum;
 
 public sealed interface Price {
 
-record Limit() implements skull_test_transform_enum.Price { }
-record Market() implements skull_test_transform_enum.Price { }
+record Limit() implements skrull_test_transform_enum.Price { }
+record Market() implements skrull_test_transform_enum.Price { }
 record StopLimit(
   double stop_price
-) implements skull_test_transform_enum.Price { }
+) implements skrull_test_transform_enum.Price { }
 
 }
 "#.to_string())
     );
 
     assert_eq!(
-        java.resolve("skull_test_transform_enum.Some").map(ToString::to_string),
-        /*language=java*/Some(r#"package skull_test_transform_enum;
+        java.resolve("skrull_test_transform_enum.Some").map(ToString::to_string),
+        /*language=java*/Some(r#"package skrull_test_transform_enum;
 
 record Some(
-  skull_test_transform_enum.Price _0
+  skrull_test_transform_enum.Price _0
 ) {
 
-  public static boolean is_priced(skull_test_transform_enum.Some maybe_price) {
+  public static boolean is_priced(skrull_test_transform_enum.Some maybe_price) {
     final boolean _if_0_2;
-    if (maybe_price instanceof skull_test_transform_enum.Some) {
-      final skull_test_transform_enum.Some _1_0 = ((skull_test_transform_enum.Some) maybe_price);
-      final skull_test_transform_enum.Price _1_1 = _1_0._0();
-      _if_0_2 = _1_1 instanceof skull_test_transform_enum.Price.Limit || _1_1 instanceof skull_test_transform_enum.Price.StopLimit;
+    if (maybe_price instanceof skrull_test_transform_enum.Some) {
+      final skrull_test_transform_enum.Some _1_0 = ((skrull_test_transform_enum.Some) maybe_price);
+      final skrull_test_transform_enum.Price _1_1 = _1_0._0();
+      _if_0_2 = _1_1 instanceof skrull_test_transform_enum.Price.Limit || _1_1 instanceof skrull_test_transform_enum.Price.StopLimit;
     } else {
       _if_0_2 = false;
     }

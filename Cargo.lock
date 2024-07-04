@@ -128,7 +128,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "skull"
+name = "skrull"
 version = "0.1.0"
 dependencies = [
  "clap",
