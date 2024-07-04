@@ -25,6 +25,13 @@ trait ToTsResolver {
         TsType::from_type_ref(self, typ)
     }
 
+    fn convert_return_types(&self, typ: &TypeRef) -> TsType {
+        match typ {
+            TypeRef::Primitive(PrimitiveType::Unit) => TsType::Void,
+            typ => TsType::from_type_ref(self, typ)
+        }
+    }
+
     fn convert_kind(&self, typ: &SkValueKind) -> TsValueKind {
         let kind = value_kind_to_type_ref(typ);
         match kind {
@@ -64,6 +71,7 @@ impl Display for TsVisibility {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum TsType {
+    Void,
     Undefined,
     Boolean,
     Number,
@@ -74,6 +82,7 @@ enum TsType {
 impl Display for TsType {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
+            TsType::Void => write!(f, "void"),
             TsType::Undefined => write!(f, "undefined"),
             TsType::Boolean => write!(f, "boolean"),
             TsType::Number => write!(f, "number"),
@@ -730,7 +739,7 @@ impl<'a> TryFrom<&'a Module> for TsModule {
         for (id, def) in &builder.pending_functions {
             let Some(body) = def.body() else { continue; };
 
-            let ret_type = builder.convert_types(def.ret_type());
+            let ret_type = builder.convert_return_types(def.ret_type());
 
             let function = TsFunction {
                 doc: def.doc().cloned(),
@@ -778,7 +787,7 @@ impl<'a> TryFrom<&'a Module> for TsModule {
     }
 }
 
-struct TsModule {
+pub struct TsModule {
     symbols: Vec<TsSymbol>,
     by_fqdn: BTreeMap<String, usize>,
 }
@@ -908,6 +917,7 @@ impl TsValueKind {
             TsValueKind::Never => "null",
             TsValueKind::Void => "null",
             TsValueKind::TsType(typ) => match typ {
+                TsType::Void => "null",
                 TsType::Undefined => "null",
                 TsType::Boolean => "false",
                 TsType::String => "\"\"",

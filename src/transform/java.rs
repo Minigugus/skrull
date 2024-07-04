@@ -532,7 +532,7 @@ impl<'a> Display for WithMethods<'a, JavaSymbolKind> {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct JavaSymbol {
+pub struct JavaSymbol {
     pkg: String,
     kind: JavaSymbolKind,
     methods: BTreeMap<usize, JavaFunction>,
@@ -782,12 +782,16 @@ impl<'a> TryFrom<&'a Module> for JavaModule {
     }
 }
 
-struct JavaModule {
+pub struct JavaModule {
     symbols: Vec<JavaSymbol>,
     by_fqdn: BTreeMap<String, usize>,
 }
 
 impl JavaModule {
+    pub fn classes(&self) -> impl IntoIterator<Item=&String> {
+        self.by_fqdn.keys()
+    }
+
     pub fn resolve(&self, fqdn: &str) -> Option<&JavaSymbol> {
         self.by_fqdn
             .get(fqdn)
